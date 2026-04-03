@@ -29,3 +29,17 @@ node cli.js recommend
 
 - The CLI stores OAuth tokens at `.tokens.json`.
 - If you play multiple leagues, `discover` will list them and pick the first. You can edit `leagueKey` and `teamKey` in `config.json` after discovery.
+
+## Branch Helpers
+
+Create a feature branch:
+
+```bash
+scripts/git-start.sh <feature-name>
+```
+
+Finish and merge your current feature branch into `main`:
+
+```bash
+scripts/git-finish.sh
+```
