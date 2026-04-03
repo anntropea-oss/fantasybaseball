@@ -1,0 +1,35 @@
+Auto-renew Enabled:	No
+Custom League URL:	https://baseball.fantasysports.yahoo.com/league/cocreatordude
+Draft Type:	Live Standard Draft
+Draft Time:	Sun Mar 22 7:00pm EDT
+Live Draft Pick Time:	1 Minute, 30 Seconds
+Cash League Settings:	Not a cash league
+Max Teams:	13
+Scoring Type:	Rotisserie
+Player Universe:	All baseball
+New Players Become Available:	As soon as Yahoo adds them View List of Forced Players
+Max Acquisitions for Entire Season:	No maximum
+Max Trades for Entire Season	No maximum
+Trade End Date:	August 6, 2026
+Allow Draft Pick Trades:	No
+Waiver Time:	2 days
+Waiver Type:	Continual rolling list
+Waiver Mode:	Standard
+Allow injured players from waivers or free agents to be added directly to injury slot:	No
+Can't Cut List Provider:	Yahoo Sports
+Trade Review:	League Votes
+Votes Required to Veto:	Default
+Trade Reject Time:	2 days
+Post Draft Players:	Follow Waiver Rules
+Max Games Played:	162
+Max Innings Pitched:	1250
+Roster Changes:	Daily - Tomorrow
+Start Scoring on:	Wednesday, Mar 25
+End Scoring on:	Sunday, Sep 27
+Lock Benched Players:	No
+Make League Publicly Viewable:	No
+Invite Permissions:	Commissioner Only
+Send unjoined players email reminders:	Yes
+Roster Positions:	C, 1B, 2B, 3B, SS, OF, OF, OF, Util, Util, SP, SP, RP, RP, P, P, P, P, BN, BN, BN, BN, BN, IL, IL
+Batters Stat Categories:	Runs (R), Home Runs (HR), Runs Batted In (RBI), Stolen Bases (SB), Batting Average (AVG)
+Pitchers Stat Categories:	Wins (W), Saves (SV), Strikeouts (K), Earned Run Average (ERA), (Walks + Hits)/ Innings Pitched (WHIP)

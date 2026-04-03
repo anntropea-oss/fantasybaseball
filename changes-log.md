@@ -1,0 +1,50 @@
+# Changes Log
+
+## 2026-04-03
+- Excluded IL players from START recommendations.
+- Excluded IL-status players from START even if not slotted on IL.
+- Prefilled doNotDrop with core rostered players.
+- Added configurable do-not-drop list to block drop recommendations.
+- Added fallback START list (best available bench) when no bench fits needs.
+- Added confidence tags to DROP recommendations.
+- Added league/team display names in output (configurable).
+- Added automatic action inference from roster changes (no manual logging required).
+- Snapshot now includes roster state for action inference.
+- Added interactive prompt after recommend to log actions taken (can disable with --no-log-prompt).
+
+## 2026-04-01
+- Added daily logging system (snapshots, actions, effectiveness evaluation).
+- Added `log` command to record actions actually taken.
+- Added lightweight learning boosts to prioritize responsive categories.
+
+## 2026-03-30
+- Suppressed DROP fallback message when a drop list is printed.
+- Improved DROP logic to avoid empty drop pool when START includes all bench players.
+- Treated missing player stat values ('-' or '') as zero for drop scoring.
+- Added DROP recommendations based on recent performance using bench player stats by key (lastmonth/lastweek/season fallback).
+- Added fallback to basic roster if stats roster is unavailable.
+- Avoided overlapping START and DROP recommendations and clarified drop logic.
+- Made recommend output more compact.
+- Added START/ADD/DROP action labels with roster-based bench suggestions.
+- Added best value targets summary (points per unit) after point gain targets.
+- Added points-per-unit efficiency to point gain targets for each category.
+
+## 2026-03-29
+- Added league settings file with roto categories, caps, season dates, and roster slots.
+- Updated CLI to read league settings from /Users/atropea/coding/fantasy baseball/fantasy/league-settings.json.
+- Added auto-create for config.json from config.example.json when missing.
+- Added support for YAHOO_CONSUMER_KEY and YAHOO_CONSUMER_SECRET environment variables.
+- Added --debug / YAHOO_DEBUG=1 logging for OAuth token requests.
+- Added OAuth 2.0 authorization code flow and token refresh support.
+- Updated Yahoo API requests to use Bearer access tokens.
+- Updated connectivity check to use OAuth 2.0 authorization endpoint.
+- Added redirectUri and oauthScope settings for OAuth 2.0 auth URL.
+- Added --debug-json / YAHOO_DEBUG_JSON=1 to dump Yahoo API payloads.
+- Added cleanup command to remove debug JSON files.
+- Added --top to control number of suggestions shown (including fallback section).
+- Set default --top to 3 with option to increase via --top.
+- Added point gain estimator for next team above in each category.
+- Rounded rank target calculations to whole numbers.
+- Added category-specific hitter/pitcher suggestions.
+- Hardened stat/name/position parsing for Yahoo response shapes.
+- Improved recommendation output to use league categories, show pace vs caps, and suggest roster tweaks by need.

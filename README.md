@@ -1,2 +1,31 @@
-# fantasybaseball
-Manage fantasy baseball team in league
+# Yahoo Fantasy Baseball Assistant
+
+Manage a fantasy baseball team from the command line. This CLI connects to the Yahoo Fantasy Sports API, discovers your league/team, and prints daily recommendations.
+
+## Setup
+
+1. Create a Yahoo Developer app and enable **Fantasy Sports** access (Read or Read/Write).
+2. Copy `config.example.json` to `config.json` and fill in your consumer key/secret.
+3. Run the auth flow to store your access tokens.
+
+```bash
+cp config.example.json config.json
+node cli.js auth
+```
+
+4. Discover your league + team keys (writes to `config.json`).
+
+```bash
+node cli.js discover
+```
+
+5. Generate recommendations.
+
+```bash
+node cli.js recommend
+```
+
+## Notes
+
+- The CLI stores OAuth tokens at `.tokens.json`.
+- If you play multiple leagues, `discover` will list them and pick the first. You can edit `leagueKey` and `teamKey` in `config.json` after discovery.

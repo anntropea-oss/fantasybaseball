@@ -1,0 +1,63 @@
+{
+  "customLeagueUrl": "https://baseball.fantasysports.yahoo.com/league/cocreatordude",
+  "leagueUrlSlug": "cocreatordude",
+  "scoringType": "Rotisserie",
+  "maxTeams": 13,
+  "rosterChanges": "Daily - Tomorrow",
+  "season": {
+    "start": "2026-03-25",
+    "end": "2026-09-27"
+  },
+  "caps": {
+    "gamesPlayed": 162,
+    "inningsPitched": 1250
+  },
+  "categories": {
+    "batting": ["R", "HR", "RBI", "SB", "AVG"],
+    "pitching": ["W", "SV", "K", "ERA", "WHIP"]
+  },
+  "categoryAliases": {
+    "R": ["Runs", "Runs (R)", "R"],
+    "HR": ["Home Runs", "Home Runs (HR)", "HR"],
+    "RBI": ["Runs Batted In", "Runs Batted In (RBI)", "RBI"],
+    "SB": ["Stolen Bases", "Stolen Bases (SB)", "SB"],
+    "AVG": ["Batting Average", "Batting Average (AVG)", "AVG"],
+    "W": ["Wins", "Wins (W)", "W"],
+    "SV": ["Saves", "Saves (SV)", "SV"],
+    "K": ["Strikeouts", "Strikeouts (K)", "K"],
+    "ERA": ["Earned Run Average", "Earned Run Average (ERA)", "ERA"],
+    "WHIP": [
+      "WHIP",
+      "(Walks + Hits)/ Innings Pitched",
+      "Walks + Hits / Innings Pitched",
+      "(Walks + Hits)/Innings Pitched"
+    ]
+  },
+  "rosterPositions": [
+    "C",
+    "1B",
+    "2B",
+    "3B",
+    "SS",
+    "OF",
+    "OF",
+    "OF",
+    "Util",
+    "Util",
+    "SP",
+    "SP",
+    "RP",
+    "RP",
+    "P",
+    "P",
+    "P",
+    "P",
+    "BN",
+    "BN",
+    "BN",
+    "BN",
+    "BN",
+    "IL",
+    "IL"
+  ]
+}

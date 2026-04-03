@@ -1,0 +1,12 @@
+{
+  "consumerKey": "YOUR_YAHOO_CONSUMER_KEY",
+  "consumerSecret": "YOUR_YAHOO_CONSUMER_SECRET",
+  "oauthScope": "fspt-r",
+  "redirectUri": "oob",
+  "leagueName": "",
+  "teamName": "",
+  "doNotDrop": [],
+  "gameKey": "mlb",
+  "leagueKey": "",
+  "teamKey": ""
+}
