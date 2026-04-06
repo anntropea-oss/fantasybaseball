@@ -656,11 +656,11 @@ function inferActions(prevSnapshot, currentSnapshot) {
 }
 
 function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
-  if (!actions || actions.length === 0) return learning;
+  const safeActions = Array.isArray(actions) ? actions : [];
   const lastEvaluatedId = learning.lastEvaluatedActionId;
   let pending = null;
-  for (let i = actions.length - 1; i >= 0; i -= 1) {
-    const action = actions[i];
+  for (let i = safeActions.length - 1; i >= 0; i -= 1) {
+    const action = safeActions[i];
     if (
       action.id !== lastEvaluatedId &&
       action.snapshotId &&
@@ -683,6 +683,27 @@ function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
       source = "inferred";
     }
   }
+  if (!pending) {
+    const prevSnapshot = snapshots.length >= 2 ? snapshots[snapshots.length - 2] : null;
+    if (
+      prevSnapshot &&
+      learning.lastEvaluatedSnapshotId !== prevSnapshot.id &&
+      prevSnapshot.id !== currentSnapshot.id
+    ) {
+      pending = {
+        id: `targets-${currentSnapshot.id}`,
+        date: currentSnapshot.date,
+        snapshotId: prevSnapshot.id,
+        adds: [],
+        drops: [],
+        starts: [],
+        benches: [],
+        notes: "No actions logged; evaluated target movement only.",
+        source: "targets",
+      };
+      source = "targets";
+    }
+  }
   if (!pending) return learning;
 
   const snapshotMap = new Map(snapshots.map((snap) => [snap.id, snap]));
@@ -694,6 +715,11 @@ function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
   );
   const baseMap = new Map(baseSnapshot.categories.map((cat) => [cat.key, cat]));
   const boosts = { ...(learning.categoryBoost || {}) };
+  const adherence = computeStartAdherence(baseSnapshot, currentSnapshot);
+  const adherenceFactor =
+    adherence && adherence.recommendedCount > 0
+      ? 0.3 + 0.7 * adherence.adherence
+      : 1;
   const lines = [];
 
   lines.push(`## ${currentSnapshot.date}`);
@@ -709,6 +735,11 @@ function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
   if (pending.notes) {
     lines.push(`- Notes: ${pending.notes}`);
   }
+  if (adherence && adherence.recommendedCount > 0) {
+    lines.push(
+      `- Lineup adherence: ${adherence.matched}/${adherence.recommendedCount} recommended starts used`
+    );
+  }
   lines.push("Effectiveness:");
 
   const targetKeys = baseSnapshot.targets || [];
@@ -722,7 +753,15 @@ function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
     const improved =
       deltaPoints > 0 || (lowerBetter ? deltaValue < 0 : deltaValue > 0);
     if (!boosts[key]) boosts[key] = 0;
-    boosts[key] += improved ? 0.5 : -0.2;
+    const delta =
+      source === "targets"
+        ? improved
+          ? 0.3
+          : -0.1
+        : improved
+          ? 0.5
+          : -0.2;
+    boosts[key] += delta * adherenceFactor;
     lines.push(
       `- ${key}: value ${deltaValue >= 0 ? "+" : ""}${deltaValue}, points ${
         deltaPoints >= 0 ? "+" : ""
@@ -735,7 +774,7 @@ function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
   return {
     categoryBoost: boosts,
     lastEvaluatedActionId: source === "manual" ? pending.id : learning.lastEvaluatedActionId,
-    lastEvaluatedSnapshotId: source === "inferred" ? pending.snapshotId : learning.lastEvaluatedSnapshotId,
+    lastEvaluatedSnapshotId: source === "manual" ? learning.lastEvaluatedSnapshotId : pending.snapshotId,
   };
 }
 
@@ -776,6 +815,162 @@ function formatStatValue(value, statKey) {
     return precision > 0 ? value.toFixed(precision) : `${Math.round(value)}`;
   }
   return `${value}`;
+}
+
+function buildEffectivenessSummary(snapshots, currentSnapshot) {
+  if (!snapshots || snapshots.length < 2) return null;
+  const prevSnapshot = snapshots[snapshots.length - 2];
+  if (!prevSnapshot || prevSnapshot.id === currentSnapshot.id) return null;
+
+  const lines = [];
+  const adherence = computeStartAdherence(prevSnapshot, currentSnapshot);
+  if (adherence && adherence.recommendedCount > 0) {
+    lines.push(
+      `- Lineup adherence: ${adherence.matched}/${adherence.recommendedCount} recommended starts used`
+    );
+  }
+  const prevRank = toNumber(prevSnapshot.overallRank);
+  const currRank = toNumber(currentSnapshot.overallRank);
+  if (prevRank !== null && currRank !== null) {
+    const delta = prevRank - currRank;
+    const deltaText =
+      delta === 0 ? "no change" : delta > 0 ? `+${delta}` : `${delta}`;
+    lines.push(`- Overall rank: ${prevRank} -> ${currRank} (${deltaText})`);
+  }
+
+  const prevMap = new Map(prevSnapshot.categories.map((cat) => [cat.key, cat]));
+  const currMap = new Map(currentSnapshot.categories.map((cat) => [cat.key, cat]));
+  const targetKeys = prevSnapshot.targets || [];
+  if (targetKeys.length > 0) {
+    targetKeys.forEach((key) => {
+      const prevCat = prevMap.get(key);
+      const currCat = currMap.get(key);
+      if (!prevCat || !currCat) return;
+      const deltaPoints = (currCat.points ?? 0) - (prevCat.points ?? 0);
+      const deltaValue = (currCat.value ?? 0) - (prevCat.value ?? 0);
+      const deltaPointsText =
+        deltaPoints === 0 ? "0" : deltaPoints > 0 ? `+${deltaPoints}` : `${deltaPoints}`;
+      const deltaValueText =
+        deltaValue === 0
+          ? "0"
+          : deltaValue > 0
+            ? `+${formatStatValue(deltaValue, key)}`
+            : `${formatStatValue(deltaValue, key)}`;
+      lines.push(`- ${key}: value ${deltaValueText}, points ${deltaPointsText}`);
+    });
+  }
+
+  return lines.length > 0 ? lines : null;
+}
+
+function targetsImproved(baseSnapshot, currentSnapshot) {
+  if (!baseSnapshot || !currentSnapshot) return false;
+  const targetKeys = baseSnapshot.targets || [];
+  if (targetKeys.length === 0) return false;
+  const currentMap = new Map(
+    currentSnapshot.categories.map((cat) => [cat.key, cat])
+  );
+  const baseMap = new Map(baseSnapshot.categories.map((cat) => [cat.key, cat]));
+  return targetKeys.some((key) => {
+    const baseCat = baseMap.get(key);
+    const curCat = currentMap.get(key);
+    if (!baseCat || !curCat) return false;
+    const deltaValue = (curCat.value ?? 0) - (baseCat.value ?? 0);
+    const deltaPoints = (curCat.points ?? 0) - (baseCat.points ?? 0);
+    const lowerBetter = isLowerBetter(key, baseCat.name || key);
+    return (
+      deltaPoints > 0 || (lowerBetter ? deltaValue < 0 : deltaValue > 0)
+    );
+  });
+}
+
+function computeStartAdherence(baseSnapshot, currentSnapshot) {
+  if (!baseSnapshot || !currentSnapshot) return null;
+  const recommended = baseSnapshot.actions?.start || [];
+  if (!Array.isArray(recommended) || recommended.length === 0) {
+    return { recommendedCount: 0, matched: 0, adherence: 1 };
+  }
+  const inferred = inferActions(baseSnapshot, currentSnapshot);
+  const actualStarts = new Set(inferred?.starts || []);
+  const matched = recommended.filter((name) => actualStarts.has(name)).length;
+  const adherence = recommended.length > 0 ? matched / recommended.length : 1;
+  return { recommendedCount: recommended.length, matched, adherence };
+}
+
+function buildEfficiencyScores(resolvedCategories, teamMetrics, myTeamMetrics, teamKey) {
+  const scores = new Map();
+  if (!teamMetrics || teamMetrics.length === 0 || !myTeamMetrics) return scores;
+  resolvedCategories.forEach((cat) => {
+    if (!cat.statId) return;
+    const isLower = isLowerBetter(cat.key, cat.name);
+    const myStat = myTeamMetrics.statsById.get(cat.statId);
+    const myValue = toNumber(extractStatValue(myStat));
+    const myPoints = toNumber(
+      extractStatValue(myTeamMetrics.pointsById.get(cat.statId))
+    );
+    if (myValue === null) return;
+
+    const entries = teamMetrics
+      .map((team) => {
+        const stat = team.statsById.get(cat.statId);
+        const value = toNumber(extractStatValue(stat));
+        const points = toNumber(
+          extractStatValue(team.pointsById.get(cat.statId))
+        );
+        return { teamKey: team.teamKey, value, points };
+      })
+      .filter((entry) => entry.value !== null);
+
+    const sorted = entries.sort((a, b) =>
+      isLower ? a.value - b.value : b.value - a.value
+    );
+    const myIndex = sorted.findIndex((entry) => entry.teamKey === teamKey);
+    if (myIndex === -1) return;
+
+    const mySortedValue = sorted[myIndex].value;
+    let groupStart = myIndex;
+    while (groupStart > 0 && sorted[groupStart - 1].value === mySortedValue) {
+      groupStart -= 1;
+    }
+    if (groupStart === 0) return;
+
+    const nextBetter = sorted[groupStart - 1];
+    const targetValue = nextBetter.value;
+    const delta = isLower ? mySortedValue - targetValue : targetValue - mySortedValue;
+    const pointsGain =
+      myPoints !== null && nextBetter.points !== null
+        ? nextBetter.points - myPoints
+        : null;
+    const efficiency = efficiencyValue(cat.key, delta, pointsGain);
+    if (efficiency !== null && pointsGain !== null) {
+      scores.set(cat.key, efficiency);
+    }
+  });
+  return scores;
+}
+
+function buildStaleRecommendations(snapshots) {
+  if (!snapshots || snapshots.length < 2) return new Set();
+  const latest = snapshots[snapshots.length - 1];
+  const previous = snapshots[snapshots.length - 2];
+  if (!latest || !previous) return new Set();
+  if (targetsImproved(previous, latest)) return new Set();
+
+  const stale = new Set();
+  const actions = latest.actions || {};
+  ["addBatting", "addPitching", "add", "start", "drop"].forEach((key) => {
+    const list = actions[key] || [];
+    list.forEach((name) => stale.add(name));
+  });
+  return stale;
+}
+
+function applyStalePenalty(candidates, staleSet) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return candidates;
+  if (!staleSet || staleSet.size === 0) return candidates;
+  const fresh = candidates.filter((item) => !staleSet.has(item.name));
+  const stale = candidates.filter((item) => staleSet.has(item.name));
+  return fresh.length > 0 ? [...fresh, ...stale] : candidates;
 }
 
 function formatPoints(value) {
@@ -830,14 +1025,24 @@ function dropConfidenceTag(statType, index, total, hasStats) {
   return "LOW";
 }
 
-function applyLearningBoosts(rankedCategories, learning) {
+function applyLearningBoosts(rankedCategories, learning, efficiencyScores) {
   const boosts = learning?.categoryBoost || {};
+  const maxEfficiency =
+    efficiencyScores && efficiencyScores.size > 0
+      ? Math.max(...efficiencyScores.values())
+      : 0;
   return rankedCategories
-    .map((cat) => ({
-      ...cat,
-      priorityScore: (cat.rank ?? 0) + (boosts[cat.key] || 0),
-      boost: boosts[cat.key] || 0,
-    }))
+    .map((cat) => {
+      const efficiency = efficiencyScores?.get(cat.key) || 0;
+      const efficiencyScore =
+        maxEfficiency > 0 ? (efficiency / maxEfficiency) * 2 : 0;
+      return {
+        ...cat,
+        priorityScore: (cat.rank ?? 0) + (boosts[cat.key] || 0) + efficiencyScore,
+        boost: boosts[cat.key] || 0,
+        efficiencyScore,
+      };
+    })
     .sort((a, b) => b.priorityScore - a.priorityScore);
 }
 
@@ -1148,6 +1353,8 @@ async function recommend() {
     (team) => team.teamKey === config.teamKey
   );
   const teamPointsById = myTeamMetrics?.pointsById || new Map();
+  const previousSnapshots = readJsonl(SNAPSHOT_LOG);
+  const staleRecommendationNames = buildStaleRecommendations(previousSnapshots);
 
   const categoriesConfig = leagueSettingsFile?.categories || null;
   const categoryAliases = leagueSettingsFile?.categoryAliases || {};
@@ -1185,7 +1392,17 @@ async function recommend() {
     .sort((a, b) => b.rank - a.rank);
 
   const learning = loadLearning();
-  const prioritizedCategories = applyLearningBoosts(rankedCategories, learning);
+  const efficiencyScores = buildEfficiencyScores(
+    resolvedCategories,
+    teamMetrics,
+    myTeamMetrics,
+    config.teamKey
+  );
+  const prioritizedCategories = applyLearningBoosts(
+    rankedCategories,
+    learning,
+    efficiencyScores
+  );
   const worstCategories = prioritizedCategories.slice(0, 3);
 
   const overallRank = findAllValuesByKey(teamData, "rank")[0];
@@ -1434,43 +1651,58 @@ async function recommend() {
         return true;
       };
 
-      const suggestedPlayers = players.filter(filterByNeed);
+      const suggestedPlayers = players
+        .filter(filterByNeed)
+        .map((player) => ({
+          player,
+          name: extractPlayerName(player),
+          positions: extractPlayerPositions(player),
+        }));
       if (suggestedPlayers.length > 0) {
         console.log("Actions:");
         if (battingNeeds) {
           console.log(`ADD (batting: ${battingFocus.join(", ")}):`);
-          suggestedPlayers
-            .filter((player) => !isPitcherPositions(extractPlayerPositions(player)))
+          const battingCandidates = suggestedPlayers.filter(
+            (item) => !isPitcherPositions(item.positions)
+          );
+          applyStalePenalty(battingCandidates, staleRecommendationNames)
             .slice(0, topLimit)
-            .forEach((player) => {
-              const name = extractPlayerName(player);
-              const position = extractPlayerPositions(player).join(", ");
-              console.log(`- ${name} ${position ? `(${position})` : ""}`.trim());
-              actionSuggestions.addBatting.push(name);
+            .forEach((item) => {
+              const position = item.positions.join(", ");
+              console.log(
+                `- ${item.name} ${position ? `(${position})` : ""}`.trim()
+              );
+              actionSuggestions.addBatting.push(item.name);
             });
         }
 
         if (pitchingNeeds) {
           console.log(`ADD (pitching: ${pitchingFocus.join(", ")}):`);
-          suggestedPlayers
-            .filter((player) => isPitcherPositions(extractPlayerPositions(player)))
+          const pitchingCandidates = suggestedPlayers.filter((item) =>
+            isPitcherPositions(item.positions)
+          );
+          applyStalePenalty(pitchingCandidates, staleRecommendationNames)
             .slice(0, topLimit)
-            .forEach((player) => {
-              const name = extractPlayerName(player);
-              const position = extractPlayerPositions(player).join(", ");
-              console.log(`- ${name} ${position ? `(${position})` : ""}`.trim());
-              actionSuggestions.addPitching.push(name);
+            .forEach((item) => {
+              const position = item.positions.join(", ");
+              console.log(
+                `- ${item.name} ${position ? `(${position})` : ""}`.trim()
+              );
+              actionSuggestions.addPitching.push(item.name);
             });
         }
 
         if (!battingNeeds && !pitchingNeeds) {
           console.log("ADD:");
-          suggestedPlayers.slice(0, topLimit).forEach((player) => {
-            const name = extractPlayerName(player);
-            const position = extractPlayerPositions(player).join(", ");
-            console.log(`- ${name} ${position ? `(${position})` : ""}`.trim());
-            actionSuggestions.add.push(name);
-          });
+          applyStalePenalty(suggestedPlayers, staleRecommendationNames)
+            .slice(0, topLimit)
+            .forEach((item) => {
+              const position = item.positions.join(", ");
+              console.log(
+                `- ${item.name} ${position ? `(${position})` : ""}`.trim()
+              );
+              actionSuggestions.add.push(item.name);
+            });
         }
       } else {
         console.log("Actions: ADD list unavailable.");
@@ -1551,10 +1783,12 @@ async function recommend() {
               ? player.isPitcher
               : false
       );
+      startCandidates = applyStalePenalty(startCandidates, staleRecommendationNames);
       if (startCandidates.length === 0 && benchPlayers.length > 0) {
-        startCandidates = benchPlayers
-          .filter((player) => !player.isIL)
-          .sort((a, b) => {
+        startCandidates = applyStalePenalty(
+          benchPlayers.filter((player) => !player.isIL),
+          staleRecommendationNames
+        ).sort((a, b) => {
           if (a.rank === null && b.rank === null) return 0;
           if (a.rank === null) return 1;
           if (b.rank === null) return -1;
@@ -1604,7 +1838,8 @@ async function recommend() {
 
       let dropPrinted = false;
       if (hasStats) {
-        const dropCandidates = dropPool
+        const dropCandidates = applyStalePenalty(
+          dropPool
           .map((player) => {
             const keys = weakKeysForType(player.isPitcher);
             let score = 0;
@@ -1620,7 +1855,9 @@ async function recommend() {
             return { ...player, score, hasStat };
           })
           .filter((player) => player.hasStat)
-          .sort((a, b) => a.score - b.score);
+          .sort((a, b) => a.score - b.score),
+          staleRecommendationNames
+        );
 
         if (dropCandidates.length > 0) {
           console.log(`DROP (bench, recent ${statType}):`);
@@ -1643,13 +1880,16 @@ async function recommend() {
 
       if (!dropPrinted && benchWithRank.length > 0) {
         console.log("DROP (bench, lowest Yahoo rank):");
-        const fallback = benchWithRank
+        const fallback = applyStalePenalty(
+          benchWithRank
           .filter(
             (player) =>
               !startKeys.has(playerKey(player)) &&
               !doNotDrop.has(player.name.toLowerCase())
           )
-          .sort((a, b) => b.rank - a.rank);
+          .sort((a, b) => b.rank - a.rank),
+          staleRecommendationNames
+        );
         fallback.slice(0, topLimit).forEach((player) => {
           const position = player.positions.join(", ");
           const rankText = player.rank ? `rank ${player.rank}` : "rank N/A";
@@ -1684,6 +1924,11 @@ async function recommend() {
 
   const actionsLog = readJsonl(ACTION_LOG);
   const snapshotsLog = readJsonl(SNAPSHOT_LOG);
+  const effectivenessLines = buildEffectivenessSummary(snapshotsLog, snapshot);
+  if (effectivenessLines && effectivenessLines.length > 0) {
+    console.log("Effectiveness since last run:");
+    effectivenessLines.forEach((line) => console.log(line));
+  }
   const updatedLearning = evaluateActions({
     learning,
     actions: actionsLog,

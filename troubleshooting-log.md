@@ -182,3 +182,13 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Added status-based IL detection from Yahoo player data.
     - Problem: Some IL players are benched without being placed in an IL slot.
     - Solution: Treat players with IL/IR status as IL and exclude them from START.
+
+33. **Effectiveness tracking without manual actions**
+    - Step: Added target-based evaluation when no actions are logged or inferred.
+    - Problem: Learning never updated because roster changes were not being recorded.
+    - Solution: Compare previous target categories to current results and adjust boosts.
+
+34. **Improve effectiveness via efficiency, adherence, and stale penalties**
+    - Step: Weighted targets by points-per-unit, tracked lineup adherence, and penalized stale recs.
+    - Problem: Recommendations repeated without measurable impact.
+    - Solution: Blend efficiency into target priority, scale learning by starters actually used, and deprioritize repeated names when targets stall.

@@ -12,6 +12,13 @@
 - Snapshot now includes roster state for action inference.
 - Added interactive prompt after recommend to log actions taken (can disable with --no-log-prompt).
 
+## 2026-04-05
+- Added effectiveness summary comparing target category movement since the last run.
+- Enabled target-based learning updates even when no actions are logged or inferred.
+- Weighted target prioritization using points-per-unit efficiency.
+- Added lineup adherence tracking and tied learning adjustments to actual starters used.
+- Penalized repeated recommendations when prior targets showed no improvement.
+
 ## 2026-04-01
 - Added daily logging system (snapshots, actions, effectiveness evaluation).
 - Added `log` command to record actions actually taken.
