@@ -18,6 +18,10 @@
 - Weighted target prioritization using points-per-unit efficiency.
 - Added lineup adherence tracking and tied learning adjustments to actual starters used.
 - Penalized repeated recommendations when prior targets showed no improvement.
+- Tightened drop logic by skipping players with strong Yahoo ranks.
+- Prioritized RP adds when SV is a target for better saves streaming.
+- Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.
+- Avoided dropping SPs with missing Yahoo ranks.
 
 ## 2026-04-01
 - Added daily logging system (snapshots, actions, effectiveness evaluation).

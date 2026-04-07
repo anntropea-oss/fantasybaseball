@@ -17,6 +17,7 @@ const SNAPSHOT_LOG = path.join(LOG_DIR, "snapshots.jsonl");
 const ACTION_LOG = path.join(LOG_DIR, "actions.jsonl");
 const DAILY_LOG = path.join(LOG_DIR, "daily-log.md");
 const LEARNING_PATH = path.join(LOG_DIR, "learning.json");
+const DROP_RANK_FLOOR = 200;
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -1630,16 +1631,17 @@ async function recommend() {
     const players = findAllValuesByKey(freeAgents, "player");
     if (players.length > 0) {
       const worstCategoryKeys = worstCategories.map((cat) => cat.key);
-      const battingNeeds = worstCategoryKeys.some((cat) =>
+      const focusKeys = [...new Set([...worstCategoryKeys, ...bestValueTargets])];
+      const battingNeeds = focusKeys.some((cat) =>
         battingCategories.includes(cat)
       );
-      const pitchingNeeds = worstCategoryKeys.some((cat) =>
+      const pitchingNeeds = focusKeys.some((cat) =>
         pitchingCategories.includes(cat)
       );
-      const battingFocus = worstCategoryKeys.filter((cat) =>
+      const battingFocus = focusKeys.filter((cat) =>
         battingCategories.includes(cat)
       );
-      const pitchingFocus = worstCategoryKeys.filter((cat) =>
+      const pitchingFocus = focusKeys.filter((cat) =>
         pitchingCategories.includes(cat)
       );
 
@@ -1676,11 +1678,19 @@ async function recommend() {
             });
         }
 
-        if (pitchingNeeds) {
+      if (pitchingNeeds) {
           console.log(`ADD (pitching: ${pitchingFocus.join(", ")}):`);
-          const pitchingCandidates = suggestedPlayers.filter((item) =>
+          let pitchingCandidates = suggestedPlayers.filter((item) =>
             isPitcherPositions(item.positions)
           );
+          if (pitchingFocus.includes("SV")) {
+            pitchingCandidates = [...pitchingCandidates].sort((a, b) => {
+              const aIsRP = a.positions.includes("RP");
+              const bIsRP = b.positions.includes("RP");
+              if (aIsRP === bIsRP) return 0;
+              return aIsRP ? -1 : 1;
+            });
+          }
           applyStalePenalty(pitchingCandidates, staleRecommendationNames)
             .slice(0, topLimit)
             .forEach((item) => {
@@ -1821,7 +1831,9 @@ async function recommend() {
       const dropPool = benchPlayers.filter(
         (player) =>
           !startKeys.has(playerKey(player)) &&
-          !doNotDrop.has(player.name.toLowerCase())
+          !doNotDrop.has(player.name.toLowerCase()) &&
+          (player.rank === null || player.rank >= DROP_RANK_FLOOR) &&
+          !(player.isPitcher && player.positions.includes("SP") && player.rank === null)
       );
       const statKeysForType = (isPitcher) =>
         isPitcher ? pitchingCategories : battingCategories;
@@ -1882,12 +1894,13 @@ async function recommend() {
         console.log("DROP (bench, lowest Yahoo rank):");
         const fallback = applyStalePenalty(
           benchWithRank
-          .filter(
-            (player) =>
-              !startKeys.has(playerKey(player)) &&
-              !doNotDrop.has(player.name.toLowerCase())
-          )
-          .sort((a, b) => b.rank - a.rank),
+            .filter(
+              (player) =>
+                !startKeys.has(playerKey(player)) &&
+                !doNotDrop.has(player.name.toLowerCase()) &&
+                player.rank >= DROP_RANK_FLOOR
+            )
+            .sort((a, b) => b.rank - a.rank),
           staleRecommendationNames
         );
         fallback.slice(0, topLimit).forEach((player) => {

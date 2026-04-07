@@ -192,3 +192,13 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Weighted targets by points-per-unit, tracked lineup adherence, and penalized stale recs.
     - Problem: Recommendations repeated without measurable impact.
     - Solution: Blend efficiency into target priority, scale learning by starters actually used, and deprioritize repeated names when targets stall.
+
+35. **Tighten drop logic + boost SV streaming**
+    - Step: Added a rank floor for drop candidates and prioritized RP adds when SV is targeted.
+    - Problem: High-value starters were showing up as drop candidates and SV streaming was too weak.
+    - Solution: Skip drops for higher-ranked players and order RP adds first when SV is a target.
+
+36. **Broaden add focus + protect unranked SPs**
+    - Step: Added best-value targets to add focus and blocked drops of SPs without Yahoo ranks.
+    - Problem: SV streams could be overlooked and unranked SPs could be dropped by mistake.
+    - Solution: Union weakest categories with best-value targets for add focus, and protect SPs with null ranks.
