@@ -22,6 +22,16 @@
 - Prioritized RP adds when SV is a target for better saves streaming.
 - Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.
 - Avoided dropping SPs with missing Yahoo ranks.
+- Paired ADD recommendations with DROP candidates when available and warned when no safe drops exist.
+- Suppressed ADD recommendations when no matching DROP is available, ensuring net-neutral roster moves.
+- Ensured adds only pair with same-type drops (hitters for hitters, pitchers for pitchers).
+- Loosened drop rank floor to surface more viable drop candidates.
+- Added points-to-next-team indicator in the summary.
+- Added a secondary drop tier when primary drops are unavailable.
+- Restored effectiveness indicator even when no prior comparison exists.
+- Prioritized targets by distance to the next point in the standings.
+- Required add/drop pairs to meet a minimum Yahoo rank improvement.
+- Delayed effectiveness evaluation by two days to allow changes to take effect.
 
 ## 2026-04-01
 - Added daily logging system (snapshots, actions, effectiveness evaluation).

@@ -17,7 +17,10 @@ const SNAPSHOT_LOG = path.join(LOG_DIR, "snapshots.jsonl");
 const ACTION_LOG = path.join(LOG_DIR, "actions.jsonl");
 const DAILY_LOG = path.join(LOG_DIR, "daily-log.md");
 const LEARNING_PATH = path.join(LOG_DIR, "learning.json");
-const DROP_RANK_FLOOR = 200;
+const DROP_RANK_FLOOR = 120;
+const DROP_RANK_FLOOR_SECONDARY = 80;
+const ADD_RANK_IMPROVEMENT = 50;
+const EFFECTIVENESS_DELAY_DAYS = 2;
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -710,6 +713,16 @@ function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
   const snapshotMap = new Map(snapshots.map((snap) => [snap.id, snap]));
   const baseSnapshot = snapshotMap.get(pending.snapshotId);
   if (!baseSnapshot) return learning;
+  if (baseSnapshot.date && currentSnapshot.date) {
+    const baseDate = parseIsoDate(baseSnapshot.date);
+    const currentDate = parseIsoDate(currentSnapshot.date);
+    if (baseDate && currentDate) {
+      const diffDays = daysBetweenUtc(baseDate, currentDate);
+      if (diffDays < EFFECTIVENESS_DELAY_DAYS) {
+        return learning;
+      }
+    }
+  }
 
   const currentMap = new Map(
     currentSnapshot.categories.map((cat) => [cat.key, cat])
@@ -898,6 +911,12 @@ function computeStartAdherence(baseSnapshot, currentSnapshot) {
   return { recommendedCount: recommended.length, matched, adherence };
 }
 
+function isMeaningfulUpgrade(addRank, dropRank) {
+  if (addRank === null || addRank === undefined) return false;
+  if (dropRank === null || dropRank === undefined) return false;
+  return dropRank - addRank >= ADD_RANK_IMPROVEMENT;
+}
+
 function buildEfficiencyScores(resolvedCategories, teamMetrics, myTeamMetrics, teamKey) {
   const scores = new Map();
   if (!teamMetrics || teamMetrics.length === 0 || !myTeamMetrics) return scores;
@@ -950,6 +969,60 @@ function buildEfficiencyScores(resolvedCategories, teamMetrics, myTeamMetrics, t
   return scores;
 }
 
+function buildPointGapScores(resolvedCategories, teamMetrics, myTeamMetrics, teamKey) {
+  const scores = new Map();
+  if (!teamMetrics || teamMetrics.length === 0 || !myTeamMetrics) return scores;
+  const deltas = [];
+
+  resolvedCategories.forEach((cat) => {
+    if (!cat.statId) return;
+    const isLower = isLowerBetter(cat.key, cat.name);
+    const myStat = myTeamMetrics.statsById.get(cat.statId);
+    const myValue = toNumber(extractStatValue(myStat));
+    if (myValue === null) return;
+
+    const entries = teamMetrics
+      .map((team) => {
+        const stat = team.statsById.get(cat.statId);
+        const value = toNumber(extractStatValue(stat));
+        return { teamKey: team.teamKey, value };
+      })
+      .filter((entry) => entry.value !== null);
+
+    const sorted = entries.sort((a, b) =>
+      isLower ? a.value - b.value : b.value - a.value
+    );
+    const myIndex = sorted.findIndex((entry) => entry.teamKey === teamKey);
+    if (myIndex === -1) return;
+
+    const mySortedValue = sorted[myIndex].value;
+    let groupStart = myIndex;
+    while (groupStart > 0 && sorted[groupStart - 1].value === mySortedValue) {
+      groupStart -= 1;
+    }
+    if (groupStart === 0) return;
+
+    const nextBetter = sorted[groupStart - 1];
+    const targetValue = nextBetter.value;
+    const delta = isLower ? mySortedValue - targetValue : targetValue - mySortedValue;
+    const absDelta = Math.abs(delta);
+    if (absDelta === 0) return;
+    const units = absDelta / statUnitScale(cat.key);
+    if (!Number.isFinite(units) || units <= 0) return;
+    deltas.push({ key: cat.key, units });
+  });
+
+  if (deltas.length === 0) return scores;
+  const maxUnits = Math.max(...deltas.map((entry) => entry.units));
+  const minUnits = Math.min(...deltas.map((entry) => entry.units));
+  deltas.forEach((entry) => {
+    const normalized =
+      maxUnits === minUnits ? 1 : (maxUnits - entry.units) / (maxUnits - minUnits);
+    scores.set(entry.key, normalized);
+  });
+  return scores;
+}
+
 function buildStaleRecommendations(snapshots) {
   if (!snapshots || snapshots.length < 2) return new Set();
   const latest = snapshots[snapshots.length - 1];
@@ -995,15 +1068,19 @@ function efficiencyLabel(statKey) {
   return "pts per 1";
 }
 
+function statUnitScale(statKey) {
+  const key = (statKey || "").toString().toUpperCase();
+  if (key === "AVG") return 0.001;
+  if (key === "ERA" || key === "WHIP") return 0.01;
+  return 1;
+}
+
 function efficiencyValue(statKey, delta, pointsGain) {
   if (delta === null || delta === undefined) return null;
   if (pointsGain === null || pointsGain === undefined) return null;
   const absDelta = Math.abs(delta);
   if (absDelta === 0) return null;
-  const key = (statKey || "").toString().toUpperCase();
-  let scale = 1;
-  if (key === "AVG") scale = 0.001;
-  if (key === "ERA" || key === "WHIP") scale = 0.01;
+  const scale = statUnitScale(statKey);
   const units = absDelta / scale;
   if (units === 0) return null;
   return pointsGain / units;
@@ -1026,22 +1103,30 @@ function dropConfidenceTag(statType, index, total, hasStats) {
   return "LOW";
 }
 
-function applyLearningBoosts(rankedCategories, learning, efficiencyScores) {
+function applyLearningBoosts(rankedCategories, learning, efficiencyScores, pointGapScores) {
   const boosts = learning?.categoryBoost || {};
   const maxEfficiency =
     efficiencyScores && efficiencyScores.size > 0
       ? Math.max(...efficiencyScores.values())
+      : 0;
+  const maxGapScore =
+    pointGapScores && pointGapScores.size > 0
+      ? Math.max(...pointGapScores.values())
       : 0;
   return rankedCategories
     .map((cat) => {
       const efficiency = efficiencyScores?.get(cat.key) || 0;
       const efficiencyScore =
         maxEfficiency > 0 ? (efficiency / maxEfficiency) * 2 : 0;
+      const gapScore =
+        maxGapScore > 0 ? (pointGapScores?.get(cat.key) || 0) * 2 : 0;
       return {
         ...cat,
-        priorityScore: (cat.rank ?? 0) + (boosts[cat.key] || 0) + efficiencyScore,
+        priorityScore:
+          (cat.rank ?? 0) + (boosts[cat.key] || 0) + efficiencyScore + gapScore,
         boost: boosts[cat.key] || 0,
         efficiencyScore,
+        gapScore,
       };
     })
     .sort((a, b) => b.priorityScore - a.priorityScore);
@@ -1090,6 +1175,24 @@ function buildTeamMetrics(standings) {
     teams.push({ teamKey, teamName, statsById, pointsById });
   });
   return teams;
+}
+
+function computeTotalPoints(teamMetrics, statIds) {
+  const totals = new Map();
+  teamMetrics.forEach((team) => {
+    let total = 0;
+    let hasPoints = false;
+    statIds.forEach((statId) => {
+      const stat = team.pointsById.get(statId);
+      const points = toNumber(extractStatValue(stat));
+      if (points !== null) {
+        total += points;
+        hasPoints = true;
+      }
+    });
+    totals.set(team.teamKey, hasPoints ? total : null);
+  });
+  return totals;
 }
 
 function daysBetweenUtc(startDate, endDate) {
@@ -1387,6 +1490,10 @@ async function recommend() {
   });
 
   const statIdByKey = buildStatIdByKey(resolvedCategories);
+  const statIdsForTotals = resolvedCategories
+    .map((cat) => cat.statId)
+    .filter(Boolean);
+  const totalPointsByTeam = computeTotalPoints(teamMetrics, statIdsForTotals);
 
   const rankedCategories = resolvedCategories
     .filter((stat) => stat.rank !== null && !Number.isNaN(stat.rank))
@@ -1399,10 +1506,17 @@ async function recommend() {
     myTeamMetrics,
     config.teamKey
   );
+  const pointGapScores = buildPointGapScores(
+    resolvedCategories,
+    teamMetrics,
+    myTeamMetrics,
+    config.teamKey
+  );
   const prioritizedCategories = applyLearningBoosts(
     rankedCategories,
     learning,
-    efficiencyScores
+    efficiencyScores,
+    pointGapScores
   );
   const worstCategories = prioritizedCategories.slice(0, 3);
 
@@ -1477,6 +1591,27 @@ async function recommend() {
   console.log(`League ${leagueDisplay} | Team ${teamDisplay}`);
   if (summaryParts.length > 0) {
     console.log(summaryParts.join(" | "));
+  }
+  if (totalPointsByTeam.size > 0) {
+    const totals = teamMetrics
+      .map((team) => ({
+        teamKey: team.teamKey,
+        teamName: team.teamName,
+        totalPoints: totalPointsByTeam.get(team.teamKey),
+      }))
+      .filter((entry) => entry.totalPoints !== null)
+      .sort((a, b) => b.totalPoints - a.totalPoints);
+    const myIndex = totals.findIndex((entry) => entry.teamKey === config.teamKey);
+    if (myIndex !== -1 && myIndex > 0) {
+      const nextTeam = totals[myIndex - 1];
+      const myTotal = totals[myIndex].totalPoints;
+      const delta = nextTeam.totalPoints - myTotal;
+      const deltaText =
+        delta === 0 ? "0" : delta > 0 ? `+${delta.toFixed(1)}` : `${delta.toFixed(1)}`;
+      console.log(`Points to next team: ${deltaText} (${nextTeam.teamName})`);
+    } else if (myIndex === 0) {
+      console.log("Points to next team: leading");
+    }
   }
 
   if (worstCategories.length > 0) {
@@ -1612,6 +1747,19 @@ async function recommend() {
   }
 
   let rosterState = [];
+  let addBattingCandidates = [];
+  let addPitchingCandidates = [];
+  let addGeneralCandidates = [];
+  let addBattingLabel = null;
+  let addPitchingLabel = null;
+  let addGeneralLabel = null;
+  let startSelections = [];
+  let startLabel = null;
+  let startMessage = null;
+  let dropHeader = null;
+  let dropMessage = null;
+  let dropLines = [];
+  let dropSuggestions = [];
   const actionSuggestions = {
     addBatting: [],
     addPitching: [],
@@ -1659,29 +1807,25 @@ async function recommend() {
           player,
           name: extractPlayerName(player),
           positions: extractPlayerPositions(player),
+          isPitcher: isPitcherPositions(extractPlayerPositions(player)),
+          rank: extractPlayerRank(player),
         }));
       if (suggestedPlayers.length > 0) {
-        console.log("Actions:");
         if (battingNeeds) {
-          console.log(`ADD (batting: ${battingFocus.join(", ")}):`);
+          addBattingLabel = `ADD (batting: ${battingFocus.join(", ")}):`;
           const battingCandidates = suggestedPlayers.filter(
-            (item) => !isPitcherPositions(item.positions)
+            (item) => !item.isPitcher
           );
-          applyStalePenalty(battingCandidates, staleRecommendationNames)
-            .slice(0, topLimit)
-            .forEach((item) => {
-              const position = item.positions.join(", ");
-              console.log(
-                `- ${item.name} ${position ? `(${position})` : ""}`.trim()
-              );
-              actionSuggestions.addBatting.push(item.name);
-            });
+          addBattingCandidates = applyStalePenalty(
+            battingCandidates,
+            staleRecommendationNames
+          ).slice(0, topLimit);
         }
 
-      if (pitchingNeeds) {
-          console.log(`ADD (pitching: ${pitchingFocus.join(", ")}):`);
+        if (pitchingNeeds) {
+          addPitchingLabel = `ADD (pitching: ${pitchingFocus.join(", ")}):`;
           let pitchingCandidates = suggestedPlayers.filter((item) =>
-            isPitcherPositions(item.positions)
+            item.isPitcher
           );
           if (pitchingFocus.includes("SV")) {
             pitchingCandidates = [...pitchingCandidates].sort((a, b) => {
@@ -1691,28 +1835,18 @@ async function recommend() {
               return aIsRP ? -1 : 1;
             });
           }
-          applyStalePenalty(pitchingCandidates, staleRecommendationNames)
-            .slice(0, topLimit)
-            .forEach((item) => {
-              const position = item.positions.join(", ");
-              console.log(
-                `- ${item.name} ${position ? `(${position})` : ""}`.trim()
-              );
-              actionSuggestions.addPitching.push(item.name);
-            });
+          addPitchingCandidates = applyStalePenalty(
+            pitchingCandidates,
+            staleRecommendationNames
+          ).slice(0, topLimit);
         }
 
         if (!battingNeeds && !pitchingNeeds) {
-          console.log("ADD:");
-          applyStalePenalty(suggestedPlayers, staleRecommendationNames)
-            .slice(0, topLimit)
-            .forEach((item) => {
-              const position = item.positions.join(", ");
-              console.log(
-                `- ${item.name} ${position ? `(${position})` : ""}`.trim()
-              );
-              actionSuggestions.add.push(item.name);
-            });
+          addGeneralLabel = "ADD:";
+          addGeneralCandidates = applyStalePenalty(
+            suggestedPlayers,
+            staleRecommendationNames
+          ).slice(0, topLimit);
         }
       } else {
         console.log("Actions: ADD list unavailable.");
@@ -1805,22 +1939,14 @@ async function recommend() {
           return a.rank - b.rank;
         });
       }
-      const startSelections = startCandidates.slice(0, topLimit);
+      startSelections = startCandidates.slice(0, topLimit);
       if (startSelections.length > 0) {
-        const label =
+        startLabel =
           battingNeeds || pitchingNeeds
             ? "START (bench fits needs):"
             : "START (bench best available):";
-        console.log(label);
-        startSelections.forEach((player) => {
-          const position = player.positions.join(", ");
-          console.log(
-            `- ${player.name} ${position ? `(${position})` : ""}`.trim()
-          );
-          actionSuggestions.start.push(player.name);
-        });
       } else {
-        console.log("START: none (bench does not fit needs).");
+        startMessage = "START: none (bench does not fit needs).";
       }
 
       const startKeys = new Set(startSelections.map((player) => playerKey(player)));
@@ -1872,7 +1998,7 @@ async function recommend() {
         );
 
         if (dropCandidates.length > 0) {
-          console.log(`DROP (bench, recent ${statType}):`);
+          dropHeader = `DROP (bench, recent ${statType}):`;
           dropCandidates.slice(0, topLimit).forEach((player, idx) => {
             const position = player.positions.join(", ");
             const confidence = dropConfidenceTag(
@@ -1881,17 +2007,20 @@ async function recommend() {
               dropCandidates.length,
               true
             );
-            console.log(
+            dropLines.push(
               `- ${player.name} ${position ? `(${position})` : ""} (${confidence})`.trim()
             );
-            actionSuggestions.drop.push(player.name);
+            dropSuggestions.push({
+              name: player.name,
+              isPitcher: player.isPitcher,
+              rank: player.rank,
+            });
           });
           dropPrinted = true;
         }
       }
 
       if (!dropPrinted && benchWithRank.length > 0) {
-        console.log("DROP (bench, lowest Yahoo rank):");
         const fallback = applyStalePenalty(
           benchWithRank
             .filter(
@@ -1903,20 +2032,164 @@ async function recommend() {
             .sort((a, b) => b.rank - a.rank),
           staleRecommendationNames
         );
-        fallback.slice(0, topLimit).forEach((player) => {
-          const position = player.positions.join(", ");
-          const rankText = player.rank ? `rank ${player.rank}` : "rank N/A";
-          console.log(
-            `- ${player.name} ${position ? `(${position})` : ""} ${rankText} (LOW)`.trim()
-          );
-          actionSuggestions.drop.push(player.name);
-        });
-      } else if (!dropPrinted) {
-        console.log("DROP: recent stats unavailable.");
+        if (fallback.length > 0) {
+          dropHeader = "DROP (bench, lowest Yahoo rank):";
+          fallback.slice(0, topLimit).forEach((player) => {
+            const position = player.positions.join(", ");
+            const rankText = player.rank ? `rank ${player.rank}` : "rank N/A";
+            dropLines.push(
+              `- ${player.name} ${position ? `(${position})` : ""} ${rankText} (LOW)`.trim()
+            );
+            dropSuggestions.push({
+              name: player.name,
+              isPitcher: player.isPitcher,
+              rank: player.rank,
+            });
+          });
+        }
+      }
+
+      if (dropSuggestions.length === 0 && benchWithRank.length > 0) {
+        const secondary = applyStalePenalty(
+          benchWithRank
+            .filter(
+              (player) =>
+                !startKeys.has(playerKey(player)) &&
+                !doNotDrop.has(player.name.toLowerCase()) &&
+                player.rank >= DROP_RANK_FLOOR_SECONDARY &&
+                player.rank < DROP_RANK_FLOOR
+            )
+            .sort((a, b) => b.rank - a.rank),
+          staleRecommendationNames
+        );
+        if (secondary.length > 0) {
+          dropHeader = "DROP (bench, secondary rank):";
+          secondary.slice(0, topLimit).forEach((player) => {
+            const position = player.positions.join(", ");
+            const rankText = player.rank ? `rank ${player.rank}` : "rank N/A";
+            dropLines.push(
+              `- ${player.name} ${position ? `(${position})` : ""} ${rankText} (LOW)`.trim()
+            );
+            dropSuggestions.push({
+              name: player.name,
+              isPitcher: player.isPitcher,
+              rank: player.rank,
+            });
+          });
+        }
+      }
+
+      if (dropSuggestions.length === 0 && !dropPrinted) {
+        dropMessage = "DROP: recent stats unavailable.";
       }
     }
   } catch (error) {
     console.log("Roster actions unavailable (endpoint may be restricted).");
+  }
+
+  const printActionsHeader = (() => {
+    let printed = false;
+    return () => {
+      if (!printed) {
+        console.log("Actions:");
+        printed = true;
+      }
+    };
+  })();
+
+  const dropHitters = dropSuggestions.filter((drop) => !drop.isPitcher).map((d) => d.name);
+  const dropPitchers = dropSuggestions.filter((drop) => drop.isPitcher).map((d) => d.name);
+  const dropHittersQueue = dropSuggestions
+    .filter((drop) => !drop.isPitcher)
+    .map((d) => ({ ...d }));
+  const dropPitchersQueue = dropSuggestions
+    .filter((drop) => drop.isPitcher)
+    .map((d) => ({ ...d }));
+  const findMatchingDrop = (candidate, isPitcher) => {
+    if (!candidate) return null;
+    if (candidate.rank === null || candidate.rank === undefined) return null;
+    const queue = isPitcher ? dropPitchersQueue : dropHittersQueue;
+    for (let i = 0; i < queue.length; i += 1) {
+      const drop = queue[i];
+      if (!isMeaningfulUpgrade(candidate.rank, drop.rank)) continue;
+      queue.splice(i, 1);
+      return drop.name;
+    }
+    return null;
+  };
+  const findMatchingDropGeneral = (candidate) => {
+    const hitterDrop = findMatchingDrop(candidate, false);
+    if (hitterDrop) return hitterDrop;
+    return findMatchingDrop(candidate, true);
+  };
+
+  let addPrintedCount = 0;
+  const printAddCandidates = (label, candidates, isPitcher) => {
+    if (!candidates || candidates.length === 0) return;
+    if (!label) return;
+    const eligible = candidates
+      .map((item) => ({
+        item,
+        dropName:
+          isPitcher === null
+            ? findMatchingDropGeneral(item)
+            : findMatchingDrop(item, isPitcher),
+      }))
+      .filter((pair) => pair.dropName);
+    if (eligible.length === 0) {
+      return;
+    }
+    printActionsHeader();
+    console.log(label);
+    eligible.forEach(({ item, dropName }) => {
+      const position = item.positions.join(", ");
+      console.log(
+        `- ${item.name} ${position ? `(${position})` : ""} -> drop ${dropName}`.trim()
+      );
+      addPrintedCount += 1;
+      if (isPitcher === null) {
+        actionSuggestions.add.push(item.name);
+      } else if (isPitcher) {
+        actionSuggestions.addPitching.push(item.name);
+      } else {
+        actionSuggestions.addBatting.push(item.name);
+      }
+    });
+  };
+
+  printAddCandidates(addBattingLabel, addBattingCandidates, false);
+  printAddCandidates(addPitchingLabel, addPitchingCandidates, true);
+  printAddCandidates(addGeneralLabel, addGeneralCandidates, null);
+  if (addPrintedCount === 0 && (addBattingCandidates.length > 0 || addPitchingCandidates.length > 0 || addGeneralCandidates.length > 0)) {
+    printActionsHeader();
+    console.log("ADD: none (no safe drop upgrades available).");
+  }
+
+  if (startSelections.length > 0) {
+    printActionsHeader();
+    console.log(startLabel);
+    startSelections.forEach((player) => {
+      const position = player.positions.join(", ");
+      console.log(`- ${player.name} ${position ? `(${position})` : ""}`.trim());
+      actionSuggestions.start.push(player.name);
+    });
+  } else if (startMessage) {
+    printActionsHeader();
+    console.log(startMessage);
+  }
+
+  if (dropHeader && dropLines.length > 0) {
+    printActionsHeader();
+    console.log(dropHeader);
+    dropLines.forEach((line, idx) => {
+      console.log(line);
+      if (dropSuggestions[idx]) {
+        actionSuggestions.drop.push(dropSuggestions[idx].name);
+      }
+    });
+  } else if (dropMessage) {
+    printActionsHeader();
+    console.log(dropMessage);
   }
 
   const snapshot = buildSnapshot({
@@ -1938,9 +2211,11 @@ async function recommend() {
   const actionsLog = readJsonl(ACTION_LOG);
   const snapshotsLog = readJsonl(SNAPSHOT_LOG);
   const effectivenessLines = buildEffectivenessSummary(snapshotsLog, snapshot);
+  console.log("Effectiveness since last run:");
   if (effectivenessLines && effectivenessLines.length > 0) {
-    console.log("Effectiveness since last run:");
     effectivenessLines.forEach((line) => console.log(line));
+  } else {
+    console.log("- No prior snapshot to compare.");
   }
   const updatedLearning = evaluateActions({
     learning,

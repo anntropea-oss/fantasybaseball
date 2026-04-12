@@ -202,3 +202,33 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Added best-value targets to add focus and blocked drops of SPs without Yahoo ranks.
     - Problem: SV streams could be overlooked and unranked SPs could be dropped by mistake.
     - Solution: Union weakest categories with best-value targets for add focus, and protect SPs with null ranks.
+
+37. **Tie adds to drops**
+    - Step: Reworked ADD output to pair with DROP candidates and warn when no safe drops exist.
+    - Problem: Adds weren’t actionable without knowing who to drop.
+    - Solution: Match adds to drop candidates by hitter/pitcher and print an explicit drop hint.
+
+38. **Require drop for every add**
+    - Step: Suppressed adds when no drop is available and only printed add+drop pairs.
+    - Problem: Adds without drops implied impossible moves.
+    - Solution: Emit adds only when a matching drop candidate exists.
+
+39. **Match add/drop by type**
+    - Step: Restricted add/drop pairing to same-type (hitter for hitter, pitcher for pitcher).
+    - Problem: Pitcher drops were suggested for hitter adds and vice versa.
+    - Solution: Only pair adds with a drop of the same type, otherwise suppress the add.
+
+40. **Loosen drops + next-team gap**
+    - Step: Lowered the drop rank floor and added next-team point gap in output.
+    - Problem: Adds were suppressed too often and no sense of overall points gap.
+    - Solution: Allow more drop candidates and show how many roto points separate the next team.
+
+41. **Secondary drop tier + always-on effectiveness**
+    - Step: Added a secondary rank-based drop tier and ensured effectiveness output always prints.
+    - Problem: Add recommendations were still blocked and effectiveness could disappear when no comparison was available.
+    - Solution: Introduced a lower-rank fallback drop list and show a fallback message when no prior snapshot exists.
+
+42. **Distance-to-point targeting + upgrade gating + eval delay**
+    - Step: Weighted targets by gap to next point, required add/drop rank upgrades, and delayed evaluation.
+    - Problem: Stat gains weren’t translating to points and adds were low-impact.
+    - Solution: Prioritize categories closest to a point gain, only suggest clear upgrades, and wait 2 days before judging results.
