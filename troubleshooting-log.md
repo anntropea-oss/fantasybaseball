@@ -247,3 +247,13 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Permitted NA/DTD/IL drops without requiring rank or stat upgrades.
     - Problem: Status-based drops were still blocked by upgrade gating.
     - Solution: Treat status drops as automatically eligible for upgrades.
+
+46. **Status drops anywhere**
+    - Step: Included NA/DTD/IL players across the roster (not just bench) as drop candidates.
+    - Problem: Status-eligible drops were missing when they weren't on the bench.
+    - Solution: Scan the full roster for status drops while honoring do-not-drop.
+
+47. **Protect last catcher**
+    - Step: Added a guardrail to block dropping the only active catcher.
+    - Problem: Suggested drops could leave the roster without a healthy catcher.
+    - Solution: Only allow catcher drops when another active catcher exists.

@@ -484,6 +484,10 @@ function isPitcherPositions(positions) {
   return positions.some((pos) => ["SP", "RP", "P"].includes(pos));
 }
 
+function isCatcherPositions(positions) {
+  return positions.some((pos) => pos === "C");
+}
+
 function isBenchPosition(positions) {
   return positions.some((pos) => ["BN", "BE"].includes(pos));
 }
@@ -1898,6 +1902,9 @@ async function recommend() {
     });
     writeDebugJson(`roster-${statType || "base"}`, roster);
 
+    const doNotDrop = new Set(
+      (config.doNotDrop || []).map((name) => name.toLowerCase())
+    );
     const rosterPlayers = findAllValuesByKey(roster, "player");
     rosterState = buildRosterState(rosterPlayers);
     const mappedPlayers = rosterPlayers
@@ -1922,7 +1929,23 @@ async function recommend() {
           isIL: isILPosition(selected) || isILStatus(status),
         };
       });
+    const activeCatchers = mappedPlayers.filter(
+      (player) =>
+        isCatcherPositions(player.positions) &&
+        !isDropStatus(player.status) &&
+        !player.isIL
+    );
+    const canDropCatcher = (player) => {
+      if (!isCatcherPositions(player.positions)) return true;
+      return activeCatchers.some((catcher) => catcher.playerKey !== player.playerKey);
+    };
     const allBenchPlayers = mappedPlayers.filter((player) => player.isBench);
+    const statusAnywhereCandidates = mappedPlayers.filter(
+      (player) =>
+        isDropStatus(player.status) &&
+        canDropCatcher(player) &&
+        !doNotDrop.has(player.name.toLowerCase())
+    );
     let benchPlayers = allBenchPlayers.filter((player) => !player.isIL);
 
     if (!hasStats) {
@@ -1990,13 +2013,11 @@ async function recommend() {
 
       const startKeys = new Set(startSelections.map((player) => playerKey(player)));
       const benchWithRank = allBenchPlayers.filter((player) => player.rank !== null);
-      const doNotDrop = new Set(
-        (config.doNotDrop || []).map((name) => name.toLowerCase())
-      );
       const dropPool = allBenchPlayers.filter(
         (player) =>
           !startKeys.has(playerKey(player)) &&
           !doNotDrop.has(player.name.toLowerCase()) &&
+          canDropCatcher(player) &&
           (player.rank === null || player.rank >= DROP_RANK_FLOOR) &&
           !(player.isPitcher && player.positions.includes("SP") && player.rank === null)
       );
@@ -2014,8 +2035,8 @@ async function recommend() {
       };
 
       let dropPrinted = false;
-      const statusCandidates = dropPool.filter((player) =>
-        isDropStatus(player.status)
+      const statusCandidates = statusAnywhereCandidates.filter(
+        (player) => !startKeys.has(playerKey(player))
       );
       if (statusCandidates.length > 0) {
         dropHeader = "DROP (status: NA/DTD/IL):";

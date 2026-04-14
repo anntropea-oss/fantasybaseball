@@ -37,6 +37,8 @@
 - Added status-based drops (NA/DTD/IL) as low-risk options.
 - Enabled stat-based add/drop upgrades when ranks are missing.
 - Allowed status-based drops regardless of rank or stat comparisons.
+- Surfaced status-eligible players anywhere on the roster as drop candidates.
+- Prevented dropping the last active catcher.
 
 ## 2026-04-01
 - Added daily logging system (snapshots, actions, effectiveness evaluation).
