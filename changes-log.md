@@ -18,6 +18,11 @@
 - Weighted target prioritization using points-per-unit efficiency.
 - Added lineup adherence tracking and tied learning adjustments to actual starters used.
 - Penalized repeated recommendations when prior targets showed no improvement.
+
+## 2026-04-14
+- Added `--position` (`--pos`) filter to `recommend` for position-specific adds (e.g., catchers).
+- Increased free agent pool and API filtering when a position is requested.
+- Added catcher ranking output using live season stats when `--position C` is set.
 - Tightened drop logic by skipping players with strong Yahoo ranks.
 - Prioritized RP adds when SV is a target for better saves streaming.
 - Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.
@@ -39,6 +44,8 @@
 - Allowed status-based drops regardless of rank or stat comparisons.
 - Surfaced status-eligible players anywhere on the roster as drop candidates.
 - Prevented dropping the last active catcher.
+- Added position filter (--position) for targeted add/drop suggestions.
+- Added live-stat catcher ranking output when using --position C.
 
 ## 2026-04-01
 - Added daily logging system (snapshots, actions, effectiveness evaluation).

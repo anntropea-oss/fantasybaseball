@@ -257,3 +257,13 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Added a guardrail to block dropping the only active catcher.
     - Problem: Suggested drops could leave the roster without a healthy catcher.
     - Solution: Only allow catcher drops when another active catcher exists.
+
+48. **Position filter + catcher ranking**
+    - Step: Added --position filtering and live-stats catcher ranking output.
+    - Problem: Needed catcher-specific recommendations and ranking without manual lookup.
+    - Solution: Allow position-scoped add lists and compute catcher rankings from season stats.
+
+49. **Empty catcher list with `--position C`**
+    - Step: Ran `recommend --position C` expecting catcher rankings.
+    - Problem: No catcher list appeared because the free-agent list was limited and filtered by category need.
+    - Solution: Added position filtering in the API request, increased the free-agent pool size for position requests, and bypassed need-based filtering when `--position` is set.

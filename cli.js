@@ -23,6 +23,7 @@ const ADD_RANK_IMPROVEMENT = 30;
 const ADD_STAT_SCORE_IMPROVEMENT = 0.5;
 const EFFECTIVENESS_DELAY_DAYS = 2;
 const FREE_AGENT_COUNT = 50;
+const FREE_AGENT_COUNT_POSITION = 200;
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -172,6 +173,14 @@ function getTopLimit(defaultValue = 3) {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
   return Math.floor(parsed);
+}
+
+function getPositionFilter() {
+  const raw = getArgValue("--position") ?? getArgValue("--pos");
+  if (!raw) return null;
+  const upper = raw.toString().trim().toUpperCase();
+  if (upper === "CATCHER") return "C";
+  return upper;
 }
 
 function getListArg(flag) {
@@ -484,6 +493,15 @@ function isPitcherPositions(positions) {
   return positions.some((pos) => ["SP", "RP", "P"].includes(pos));
 }
 
+function isPitcherFilter(positionFilter) {
+  return ["SP", "RP", "P"].includes(positionFilter);
+}
+
+function positionMatches(positions, positionFilter) {
+  if (!positionFilter) return true;
+  return positions.includes(positionFilter);
+}
+
 function isCatcherPositions(positions) {
   return positions.some((pos) => pos === "C");
 }
@@ -539,8 +557,8 @@ async function fetchRosterWithStats({ accessToken, teamKey }) {
   return { roster, statType: null, hasStats: false };
 }
 
-async function fetchPlayerStatsByKeys({ accessToken, playerKeys }) {
-  const statTypes = ["lastmonth", "lastweek", "season"];
+async function fetchPlayerStatsByKeys({ accessToken, playerKeys, statTypeOverride = null }) {
+  const statTypes = statTypeOverride ? [statTypeOverride] : ["lastmonth", "lastweek", "season"];
   if (!playerKeys || playerKeys.length === 0) {
     return { statsByKey: new Map(), statType: null, hasStats: false };
   }
@@ -948,6 +966,48 @@ function computeStatScore(statsMap, statKeys, statIdByKey) {
     score += isLowerBetter(key, key) ? -value : value;
   });
   return hasStat ? score : null;
+}
+
+function rankHittersByStats(candidates, statIdByKey, targetKeys) {
+  const statKeys = ["R", "HR", "RBI", "SB", "AVG"];
+  const weights = {};
+  statKeys.forEach((key) => {
+    weights[key] = targetKeys.includes(key) ? 1.5 : 1;
+  });
+  const valuesByKey = {};
+  statKeys.forEach((key) => {
+    const statId = statIdByKey.get(key);
+    valuesByKey[key] = candidates.map((candidate) => {
+      if (!statId) return 0;
+      return candidate.stats?.get(statId) ?? 0;
+    });
+  });
+  const mean = (arr) => arr.reduce((sum, v) => sum + v, 0) / (arr.length || 1);
+  const std = (arr, m) => {
+    const variance =
+      arr.reduce((sum, v) => sum + Math.pow(v - m, 2), 0) / (arr.length || 1);
+    return Math.sqrt(variance) || 1;
+  };
+  const zStats = {};
+  statKeys.forEach((key) => {
+    const vals = valuesByKey[key];
+    const m = mean(vals);
+    const s = std(vals, m);
+    zStats[key] = { m, s };
+  });
+
+  return candidates
+    .map((candidate) => {
+      let score = 0;
+      statKeys.forEach((key) => {
+        const statId = statIdByKey.get(key);
+        const raw = statId ? candidate.stats?.get(statId) ?? 0 : 0;
+        const z = (raw - zStats[key].m) / zStats[key].s;
+        score += z * weights[key];
+      });
+      return { ...candidate, score };
+    })
+    .sort((a, b) => b.score - a.score);
 }
 
 function buildEfficiencyScores(resolvedCategories, teamMetrics, myTeamMetrics, teamKey) {
@@ -1440,6 +1500,7 @@ async function recommend() {
   const config = loadConfig();
   const leagueSettingsFile = loadLeagueSettingsFile();
   const accessToken = await getAccessToken(config);
+  const positionFilter = getPositionFilter();
   if (!config.leagueKey || !config.teamKey) {
     throw new Error("Missing leagueKey/teamKey. Run: node fantasy/cli.js discover");
   }
@@ -1552,6 +1613,7 @@ async function recommend() {
     pointGapScores
   );
   const worstCategories = prioritizedCategories.slice(0, 3);
+  const targetKeys = worstCategories.map((cat) => cat.key);
 
   const overallRank = findAllValuesByKey(teamData, "rank")[0];
   const today = new Date();
@@ -1783,9 +1845,13 @@ async function recommend() {
   let addBattingCandidates = [];
   let addPitchingCandidates = [];
   let addGeneralCandidates = [];
+  let addPositionCandidates = [];
+  let addPositionAllCandidates = [];
   let addBattingLabel = null;
   let addPitchingLabel = null;
   let addGeneralLabel = null;
+  let addPositionLabel = null;
+  let addPositionIsPitcher = null;
   let battingFocusKeys = [];
   let pitchingFocusKeys = [];
   let startSelections = [];
@@ -1805,8 +1871,12 @@ async function recommend() {
 
   try {
     const topLimit = getTopLimit(3);
+    const freeAgentCount = positionFilter
+      ? FREE_AGENT_COUNT_POSITION
+      : FREE_AGENT_COUNT;
+    const positionParam = positionFilter ? `;position=${positionFilter}` : "";
     const freeAgents = await yahooRequest({
-      url: `${FANTASY_API_BASE}/league/${config.leagueKey}/players;status=A;sort=AR;count=${FREE_AGENT_COUNT}?format=json`,
+      url: `${FANTASY_API_BASE}/league/${config.leagueKey}/players;status=A${positionParam};sort=AR;count=${freeAgentCount}?format=json`,
       accessToken,
     });
     writeDebugJson("free-agents", freeAgents);
@@ -1838,9 +1908,8 @@ async function recommend() {
         return true;
       };
 
-      const suggestedPlayers = players
-        .filter(filterByNeed)
-        .map((player) => ({
+      const basePlayers = positionFilter ? players : players.filter(filterByNeed);
+      const suggestedPlayers = basePlayers.map((player) => ({
           player,
           name: extractPlayerName(player),
           positions: extractPlayerPositions(player),
@@ -1849,7 +1918,18 @@ async function recommend() {
           playerKey: extractPlayerKey(player),
         }));
       if (suggestedPlayers.length > 0) {
-        if (battingNeeds) {
+        if (positionFilter) {
+          const positionCandidates = suggestedPlayers.filter((item) =>
+            positionMatches(item.positions, positionFilter)
+          );
+          addPositionLabel = `ADD (position ${positionFilter}):`;
+          addPositionIsPitcher = isPitcherFilter(positionFilter);
+          addPositionAllCandidates = applyStalePenalty(
+            positionCandidates,
+            staleRecommendationNames
+          );
+          addPositionCandidates = addPositionAllCandidates.slice(0, topLimit);
+        } else if (battingNeeds) {
           addBattingLabel = `ADD (batting: ${battingFocus.join(", ")}):`;
           const battingCandidates = suggestedPlayers.filter(
             (item) => !item.isPitcher
@@ -1860,7 +1940,7 @@ async function recommend() {
           ).slice(0, topLimit);
         }
 
-        if (pitchingNeeds) {
+        if (!positionFilter && pitchingNeeds) {
           addPitchingLabel = `ADD (pitching: ${pitchingFocus.join(", ")}):`;
           let pitchingCandidates = suggestedPlayers.filter((item) =>
             item.isPitcher
@@ -1879,7 +1959,7 @@ async function recommend() {
           ).slice(0, topLimit);
         }
 
-        if (!battingNeeds && !pitchingNeeds) {
+        if (!positionFilter && !battingNeeds && !pitchingNeeds) {
           addGeneralLabel = "ADD:";
           addGeneralCandidates = applyStalePenalty(
             suggestedPlayers,
@@ -2243,6 +2323,8 @@ async function recommend() {
     ...addBattingCandidates,
     ...addPitchingCandidates,
     ...addGeneralCandidates,
+    ...addPositionCandidates,
+    ...addPositionAllCandidates,
   ];
   if (allAddCandidates.length > 0) {
     const addKeys = allAddCandidates
@@ -2252,6 +2334,7 @@ async function recommend() {
       const addStatsResult = await fetchPlayerStatsByKeys({
         accessToken,
         playerKeys: addKeys,
+        statTypeOverride: positionFilter ? "season" : null,
       });
       if (addStatsResult.hasStats) {
         const applyAddStats = (candidate) => ({
@@ -2261,6 +2344,8 @@ async function recommend() {
         addBattingCandidates = addBattingCandidates.map(applyAddStats);
         addPitchingCandidates = addPitchingCandidates.map(applyAddStats);
         addGeneralCandidates = addGeneralCandidates.map(applyAddStats);
+        addPositionCandidates = addPositionCandidates.map(applyAddStats);
+        addPositionAllCandidates = addPositionAllCandidates.map(applyAddStats);
       }
     }
   }
@@ -2286,6 +2371,14 @@ async function recommend() {
   addGeneralCandidates = addGeneralCandidates.map((candidate) => ({
     ...candidate,
     statsScore: addScoreFor(candidate, candidate.isPitcher),
+  }));
+  addPositionCandidates = addPositionCandidates.map((candidate) => ({
+    ...candidate,
+    statsScore: addScoreFor(candidate, addPositionIsPitcher ?? candidate.isPitcher),
+  }));
+  addPositionAllCandidates = addPositionAllCandidates.map((candidate) => ({
+    ...candidate,
+    statsScore: addScoreFor(candidate, addPositionIsPitcher ?? candidate.isPitcher),
   }));
 
   let addPrintedCount = 0;
@@ -2325,7 +2418,14 @@ async function recommend() {
   printAddCandidates(addBattingLabel, addBattingCandidates, false);
   printAddCandidates(addPitchingLabel, addPitchingCandidates, true);
   printAddCandidates(addGeneralLabel, addGeneralCandidates, null);
-  if (addPrintedCount === 0 && (addBattingCandidates.length > 0 || addPitchingCandidates.length > 0 || addGeneralCandidates.length > 0)) {
+  printAddCandidates(addPositionLabel, addPositionCandidates, addPositionIsPitcher);
+  if (
+    addPrintedCount === 0 &&
+    (addBattingCandidates.length > 0 ||
+      addPitchingCandidates.length > 0 ||
+      addGeneralCandidates.length > 0 ||
+      addPositionCandidates.length > 0)
+  ) {
     printActionsHeader();
     console.log("ADD: none (no safe drop upgrades available).");
   }
@@ -2355,6 +2455,32 @@ async function recommend() {
   } else if (dropMessage) {
     printActionsHeader();
     console.log(dropMessage);
+  }
+
+  if (positionFilter === "C" && addPositionAllCandidates.length > 0) {
+    const rankedCatchers = rankHittersByStats(
+      addPositionAllCandidates,
+      statIdByKey,
+      targetKeys
+    );
+    console.log("Catcher options (live season stats):");
+    rankedCatchers.slice(0, getTopLimit(5)).forEach((candidate, idx) => {
+      const statR = statIdByKey.get("R");
+      const statHR = statIdByKey.get("HR");
+      const statRBI = statIdByKey.get("RBI");
+      const statSB = statIdByKey.get("SB");
+      const statAVG = statIdByKey.get("AVG");
+      const values = {
+        R: statR ? candidate.stats?.get(statR) ?? 0 : 0,
+        HR: statHR ? candidate.stats?.get(statHR) ?? 0 : 0,
+        RBI: statRBI ? candidate.stats?.get(statRBI) ?? 0 : 0,
+        SB: statSB ? candidate.stats?.get(statSB) ?? 0 : 0,
+        AVG: statAVG ? candidate.stats?.get(statAVG) ?? 0 : 0,
+      };
+      console.log(
+        `${idx + 1}. ${candidate.name} (${candidate.positions.join(", ")}) - R ${values.R}, HR ${values.HR}, RBI ${values.RBI}, SB ${values.SB}, AVG ${values.AVG}`
+      );
+    });
   }
 
   const snapshot = buildSnapshot({
@@ -2454,7 +2580,7 @@ async function main() {
       await recommend();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|log|recommend> [--top N]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|log|recommend> [--top N] [--position C]"
       );
     }
   } catch (error) {
