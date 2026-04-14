@@ -232,3 +232,18 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Weighted targets by gap to next point, required add/drop rank upgrades, and delayed evaluation.
     - Problem: Stat gains weren’t translating to points and adds were low-impact.
     - Solution: Prioritize categories closest to a point gain, only suggest clear upgrades, and wait 2 days before judging results.
+
+43. **Relax upgrade threshold**
+    - Step: Reduced the required Yahoo rank improvement for add/drop pairs.
+    - Problem: Too few actionable add/drop pairs were surfacing.
+    - Solution: Lowered the upgrade threshold from 50 to 30 ranks.
+
+44. **Expand adds + status drops + stat upgrades**
+    - Step: Increased free-agent search pool, added NA/DTD/IL drops, and used stats when ranks missing.
+    - Problem: Add/drop pairs were still blocked by a shallow free-agent list and missing ranks.
+    - Solution: Pull more free agents, allow status-based drops, and compare recent stats when ranks are absent.
+
+45. **Always allow status drops**
+    - Step: Permitted NA/DTD/IL drops without requiring rank or stat upgrades.
+    - Problem: Status-based drops were still blocked by upgrade gating.
+    - Solution: Treat status drops as automatically eligible for upgrades.

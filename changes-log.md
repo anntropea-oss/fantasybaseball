@@ -32,6 +32,11 @@
 - Prioritized targets by distance to the next point in the standings.
 - Required add/drop pairs to meet a minimum Yahoo rank improvement.
 - Delayed effectiveness evaluation by two days to allow changes to take effect.
+- Relaxed add/drop upgrade threshold from 50 to 30 ranks.
+- Expanded free-agent pool to improve add options.
+- Added status-based drops (NA/DTD/IL) as low-risk options.
+- Enabled stat-based add/drop upgrades when ranks are missing.
+- Allowed status-based drops regardless of rank or stat comparisons.
 
 ## 2026-04-01
 - Added daily logging system (snapshots, actions, effectiveness evaluation).

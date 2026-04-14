@@ -19,8 +19,10 @@ const DAILY_LOG = path.join(LOG_DIR, "daily-log.md");
 const LEARNING_PATH = path.join(LOG_DIR, "learning.json");
 const DROP_RANK_FLOOR = 120;
 const DROP_RANK_FLOOR_SECONDARY = 80;
-const ADD_RANK_IMPROVEMENT = 50;
+const ADD_RANK_IMPROVEMENT = 30;
+const ADD_STAT_SCORE_IMPROVEMENT = 0.5;
 const EFFECTIVENESS_DELAY_DAYS = 2;
+const FREE_AGENT_COUNT = 50;
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -492,6 +494,17 @@ function isILStatus(status) {
   return normalized.startsWith("IL") || normalized === "IR";
 }
 
+function isDropStatus(status) {
+  if (!status) return false;
+  const normalized = status.toString().trim().toUpperCase();
+  return (
+    normalized.startsWith("IL") ||
+    normalized === "IR" ||
+    normalized === "NA" ||
+    normalized === "DTD"
+  );
+}
+
 function isILPosition(positions) {
   return positions.some((pos) => ["IL", "IL+", "IR"].includes(pos));
 }
@@ -915,6 +928,22 @@ function isMeaningfulUpgrade(addRank, dropRank) {
   if (addRank === null || addRank === undefined) return false;
   if (dropRank === null || dropRank === undefined) return false;
   return dropRank - addRank >= ADD_RANK_IMPROVEMENT;
+}
+
+function computeStatScore(statsMap, statKeys, statIdByKey) {
+  if (!statsMap || !(statsMap instanceof Map)) return null;
+  if (!statKeys || statKeys.length === 0) return null;
+  let score = 0;
+  let hasStat = false;
+  statKeys.forEach((key) => {
+    const statId = statIdByKey.get(key);
+    if (!statId) return;
+    const value = statsMap.get(statId);
+    if (value === null || value === undefined) return;
+    hasStat = true;
+    score += isLowerBetter(key, key) ? -value : value;
+  });
+  return hasStat ? score : null;
 }
 
 function buildEfficiencyScores(resolvedCategories, teamMetrics, myTeamMetrics, teamKey) {
@@ -1753,6 +1782,8 @@ async function recommend() {
   let addBattingLabel = null;
   let addPitchingLabel = null;
   let addGeneralLabel = null;
+  let battingFocusKeys = [];
+  let pitchingFocusKeys = [];
   let startSelections = [];
   let startLabel = null;
   let startMessage = null;
@@ -1771,7 +1802,7 @@ async function recommend() {
   try {
     const topLimit = getTopLimit(3);
     const freeAgents = await yahooRequest({
-      url: `${FANTASY_API_BASE}/league/${config.leagueKey}/players;status=A;sort=AR;count=15?format=json`,
+      url: `${FANTASY_API_BASE}/league/${config.leagueKey}/players;status=A;sort=AR;count=${FREE_AGENT_COUNT}?format=json`,
       accessToken,
     });
     writeDebugJson("free-agents", freeAgents);
@@ -1792,6 +1823,8 @@ async function recommend() {
       const pitchingFocus = focusKeys.filter((cat) =>
         pitchingCategories.includes(cat)
       );
+      battingFocusKeys = battingFocus;
+      pitchingFocusKeys = pitchingFocus;
 
       const filterByNeed = (player) => {
         const positions = extractPlayerPositions(player);
@@ -1809,6 +1842,7 @@ async function recommend() {
           positions: extractPlayerPositions(player),
           isPitcher: isPitcherPositions(extractPlayerPositions(player)),
           rank: extractPlayerRank(player),
+          playerKey: extractPlayerKey(player),
         }));
       if (suggestedPlayers.length > 0) {
         if (battingNeeds) {
@@ -1866,7 +1900,7 @@ async function recommend() {
 
     const rosterPlayers = findAllValuesByKey(roster, "player");
     rosterState = buildRosterState(rosterPlayers);
-    let benchPlayers = rosterPlayers
+    const mappedPlayers = rosterPlayers
       .map((player) => {
         const name = extractPlayerName(player);
         const positions = extractPlayerPositions(player);
@@ -1887,11 +1921,12 @@ async function recommend() {
           isBench: isBenchPosition(selected),
           isIL: isILPosition(selected) || isILStatus(status),
         };
-      })
-      .filter((player) => player.isBench && !player.isIL);
+      });
+    const allBenchPlayers = mappedPlayers.filter((player) => player.isBench);
+    let benchPlayers = allBenchPlayers.filter((player) => !player.isIL);
 
     if (!hasStats) {
-      const benchKeys = benchPlayers
+      const benchKeys = allBenchPlayers
         .map((player) => player.playerKey)
         .filter(Boolean);
       const statsResult = await fetchPlayerStatsByKeys({
@@ -1901,10 +1936,14 @@ async function recommend() {
       if (statsResult.hasStats) {
         hasStats = true;
         statType = statsResult.statType;
-        benchPlayers = benchPlayers.map((player) => ({
+        const applyStats = (player) => ({
           ...player,
           stats: statsResult.statsByKey.get(player.playerKey) || new Map(),
-        }));
+        });
+        benchPlayers = benchPlayers.map(applyStats);
+        allBenchPlayers.forEach((player, index) => {
+          allBenchPlayers[index] = applyStats(player);
+        });
       }
     }
 
@@ -1950,11 +1989,11 @@ async function recommend() {
       }
 
       const startKeys = new Set(startSelections.map((player) => playerKey(player)));
-      const benchWithRank = benchPlayers.filter((player) => player.rank !== null);
+      const benchWithRank = allBenchPlayers.filter((player) => player.rank !== null);
       const doNotDrop = new Set(
         (config.doNotDrop || []).map((name) => name.toLowerCase())
       );
-      const dropPool = benchPlayers.filter(
+      const dropPool = allBenchPlayers.filter(
         (player) =>
           !startKeys.has(playerKey(player)) &&
           !doNotDrop.has(player.name.toLowerCase()) &&
@@ -1975,7 +2014,27 @@ async function recommend() {
       };
 
       let dropPrinted = false;
-      if (hasStats) {
+      const statusCandidates = dropPool.filter((player) =>
+        isDropStatus(player.status)
+      );
+      if (statusCandidates.length > 0) {
+        dropHeader = "DROP (status: NA/DTD/IL):";
+        statusCandidates.slice(0, topLimit).forEach((player) => {
+          const position = player.positions.join(", ");
+          const statusText = player.status ? `${player.status}` : "STATUS";
+          dropLines.push(
+            `- ${player.name} ${position ? `(${position})` : ""} (${statusText})`.trim()
+          );
+          dropSuggestions.push({
+            name: player.name,
+            isPitcher: player.isPitcher,
+            rank: player.rank,
+            statusDrop: true,
+          });
+        });
+        dropPrinted = true;
+      }
+      if (!dropPrinted && hasStats) {
         const dropCandidates = applyStalePenalty(
           dropPool
           .map((player) => {
@@ -2014,6 +2073,8 @@ async function recommend() {
               name: player.name,
               isPitcher: player.isPitcher,
               rank: player.rank,
+              statsScore: player.score,
+              statusDrop: false,
             });
           });
           dropPrinted = true;
@@ -2044,6 +2105,7 @@ async function recommend() {
               name: player.name,
               isPitcher: player.isPitcher,
               rank: player.rank,
+              statusDrop: false,
             });
           });
         }
@@ -2074,6 +2136,7 @@ async function recommend() {
               name: player.name,
               isPitcher: player.isPitcher,
               rank: player.rank,
+              statusDrop: false,
             });
           });
         }
@@ -2107,13 +2170,45 @@ async function recommend() {
     .map((d) => ({ ...d }));
   const findMatchingDrop = (candidate, isPitcher) => {
     if (!candidate) return null;
-    if (candidate.rank === null || candidate.rank === undefined) return null;
     const queue = isPitcher ? dropPitchersQueue : dropHittersQueue;
     for (let i = 0; i < queue.length; i += 1) {
       const drop = queue[i];
-      if (!isMeaningfulUpgrade(candidate.rank, drop.rank)) continue;
-      queue.splice(i, 1);
-      return drop.name;
+      if (drop.statusDrop && candidate.rank !== null && candidate.rank !== undefined) {
+        queue.splice(i, 1);
+        return drop.name;
+      }
+      if (drop.statusDrop) {
+        queue.splice(i, 1);
+        return drop.name;
+      }
+      if (
+        candidate.rank !== null &&
+        candidate.rank !== undefined &&
+        drop.rank !== null &&
+        drop.rank !== undefined
+      ) {
+        if (!isMeaningfulUpgrade(candidate.rank, drop.rank)) continue;
+        queue.splice(i, 1);
+        return drop.name;
+      }
+      if (
+        candidate.statsScore !== null &&
+        candidate.statsScore !== undefined &&
+        drop.statsScore !== null &&
+        drop.statsScore !== undefined
+      ) {
+        if (candidate.statsScore - drop.statsScore < ADD_STAT_SCORE_IMPROVEMENT) continue;
+        queue.splice(i, 1);
+        return drop.name;
+      }
+      if (
+        drop.statusDrop &&
+        candidate.statsScore !== null &&
+        candidate.statsScore !== undefined
+      ) {
+        queue.splice(i, 1);
+        return drop.name;
+      }
     }
     return null;
   };
@@ -2122,6 +2217,55 @@ async function recommend() {
     if (hitterDrop) return hitterDrop;
     return findMatchingDrop(candidate, true);
   };
+
+  const allAddCandidates = [
+    ...addBattingCandidates,
+    ...addPitchingCandidates,
+    ...addGeneralCandidates,
+  ];
+  if (allAddCandidates.length > 0) {
+    const addKeys = allAddCandidates
+      .map((candidate) => candidate.playerKey)
+      .filter(Boolean);
+    if (addKeys.length > 0) {
+      const addStatsResult = await fetchPlayerStatsByKeys({
+        accessToken,
+        playerKeys: addKeys,
+      });
+      if (addStatsResult.hasStats) {
+        const applyAddStats = (candidate) => ({
+          ...candidate,
+          stats: addStatsResult.statsByKey.get(candidate.playerKey) || new Map(),
+        });
+        addBattingCandidates = addBattingCandidates.map(applyAddStats);
+        addPitchingCandidates = addPitchingCandidates.map(applyAddStats);
+        addGeneralCandidates = addGeneralCandidates.map(applyAddStats);
+      }
+    }
+  }
+
+  const battingStatKeys =
+    battingFocusKeys.length > 0 ? battingFocusKeys : battingCategories;
+  const pitchingStatKeys =
+    pitchingFocusKeys.length > 0 ? pitchingFocusKeys : pitchingCategories;
+  const addScoreFor = (candidate, isPitcher) =>
+    computeStatScore(
+      candidate.stats,
+      isPitcher ? pitchingStatKeys : battingStatKeys,
+      statIdByKey
+    );
+  addBattingCandidates = addBattingCandidates.map((candidate) => ({
+    ...candidate,
+    statsScore: addScoreFor(candidate, false),
+  }));
+  addPitchingCandidates = addPitchingCandidates.map((candidate) => ({
+    ...candidate,
+    statsScore: addScoreFor(candidate, true),
+  }));
+  addGeneralCandidates = addGeneralCandidates.map((candidate) => ({
+    ...candidate,
+    statsScore: addScoreFor(candidate, candidate.isPitcher),
+  }));
 
   let addPrintedCount = 0;
   const printAddCandidates = (label, candidates, isPitcher) => {
