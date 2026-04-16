@@ -23,6 +23,10 @@
 - Added `--position` (`--pos`) filter to `recommend` for position-specific adds (e.g., catchers).
 - Increased free agent pool and API filtering when a position is requested.
 - Added catcher ranking output using live season stats when `--position C` is set.
+
+## 2026-04-16
+- Restored compact, colorized `recommend` output layout (Summary → Targets → Actions → Effectiveness).
+- Added `--verbose` to show detailed point-gain and efficiency sections.
 - Tightened drop logic by skipping players with strong Yahoo ranks.
 - Prioritized RP adds when SV is a target for better saves streaming.
 - Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.

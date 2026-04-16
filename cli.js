@@ -183,6 +183,43 @@ function getPositionFilter() {
   return upper;
 }
 
+function isVerboseEnabled() {
+  return process.argv.includes("--verbose") || process.env.FANTASY_VERBOSE === "1";
+}
+
+function supportsColorOutput() {
+  if (process.env.NO_COLOR) return false;
+  if (!process.stdout || !process.stdout.isTTY) return false;
+  if (process.env.TERM === "dumb") return false;
+  return true;
+}
+
+function ansi(code, text) {
+  if (!supportsColorOutput()) return text;
+  return `\u001b[${code}m${text}\u001b[0m`;
+}
+
+function cGreen(text) {
+  return ansi("32", text);
+}
+
+function cYellow(text) {
+  // "Brownish" in many terminals; matches the screenshot vibe.
+  return ansi("33", text);
+}
+
+function cBlue(text) {
+  return ansi("34", text);
+}
+
+function fmtBullet(text) {
+  return `${cBlue("-")} ${cGreen(text)}`;
+}
+
+function fmtLine(text) {
+  return cGreen(text);
+}
+
 function getListArg(flag) {
   const args = process.argv;
   const values = [];
@@ -1669,8 +1706,9 @@ async function recommend() {
   }
   const gpCap = leagueSettingsFile?.caps?.gamesPlayed || null;
   const ipCap = leagueSettingsFile?.caps?.inningsPitched || null;
+  const verbose = isVerboseEnabled();
 
-  console.log("Daily Recommendation Summary");
+  console.log(cGreen("Daily Recommendation Summary"));
   const progressPercent = seasonProgress !== null ? Math.round(seasonProgress * 100) : null;
   const summaryParts = [];
   if (overallRank) summaryParts.push(`Rank ${overallRank}`);
@@ -1683,9 +1721,9 @@ async function recommend() {
   }
   const leagueDisplay = config.leagueName || config.leagueKey;
   const teamDisplay = config.teamName || config.teamKey;
-  console.log(`League ${leagueDisplay} | Team ${teamDisplay}`);
+  console.log(fmtLine(`League ${leagueDisplay} | Team ${teamDisplay}`));
   if (summaryParts.length > 0) {
-    console.log(summaryParts.join(" | "));
+    console.log(fmtLine(summaryParts.join(" | ")));
   }
   if (totalPointsByTeam.size > 0) {
     const totals = teamMetrics
@@ -1703,14 +1741,15 @@ async function recommend() {
       const delta = nextTeam.totalPoints - myTotal;
       const deltaText =
         delta === 0 ? "0" : delta > 0 ? `+${delta.toFixed(1)}` : `${delta.toFixed(1)}`;
-      console.log(`Points to next team: ${deltaText} (${nextTeam.teamName})`);
+      console.log(cYellow(`Points to next team: ${deltaText} (${nextTeam.teamName})`));
     } else if (myIndex === 0) {
-      console.log("Points to next team: leading");
+      console.log(cYellow("Points to next team: leading"));
     }
   }
+  console.log("");
 
   if (worstCategories.length > 0) {
-    console.log("Targets (lowest ranks):");
+    console.log(cYellow("Targets (lowest ranks):"));
     worstCategories.forEach((cat) => {
       let targetText = "";
       const rankLabel =
@@ -1728,17 +1767,16 @@ async function recommend() {
           targetText = ", maintain (already top half)";
         }
       }
-      console.log(
-        `- ${cat.key} ${rankLabel}, val ${cat.value}${targetText}`
-      );
+      console.log(fmtBullet(`${cat.key} ${rankLabel}, val ${cat.value}${targetText}`));
     });
   } else {
-    console.log("Could not infer category ranks from standings.");
+    console.log(fmtLine("Could not infer category ranks from standings."));
   }
+  console.log("");
 
   let bestValueTargets = [];
   if (teamMetrics.length > 0 && myTeamMetrics) {
-    console.log("Point gains (next team):");
+    if (verbose) console.log(cYellow("Point gains (next team):"));
     const efficiencyRows = [];
     resolvedCategories.forEach((cat) => {
       if (!cat.statId) return;
@@ -1749,7 +1787,7 @@ async function recommend() {
         extractStatValue(myTeamMetrics.pointsById.get(cat.statId))
       );
       if (myValue === null) {
-        console.log(`- ${cat.key} (${cat.name}): N/A`);
+        if (verbose) console.log(fmtBullet(`${cat.key} (${cat.name}): N/A`));
         return;
       }
 
@@ -1771,7 +1809,7 @@ async function recommend() {
         (entry) => entry.teamKey === config.teamKey
       );
       if (myIndex === -1) {
-        console.log(`- ${cat.key} (${cat.name}): N/A`);
+        if (verbose) console.log(fmtBullet(`${cat.key} (${cat.name}): N/A`));
         return;
       }
 
@@ -1785,9 +1823,11 @@ async function recommend() {
       }
 
       if (groupStart === 0) {
-        console.log(
-          `- ${cat.key} (${cat.name}): leading (no immediate point gain)`
-        );
+        if (verbose) {
+          console.log(
+            fmtBullet(`${cat.key} (${cat.name}): leading (no immediate point gain)`)
+          );
+        }
         return;
       }
 
@@ -1811,9 +1851,13 @@ async function recommend() {
       const targetText = formatStatValue(targetValue, cat.key);
       const directionText = isLower ? `lower by ${deltaText}` : `gain ${deltaText}`;
       const teamName = nextBetter.teamName || "Next team";
-      console.log(
-        `- ${cat.key}: ${directionText} vs ${teamName} (${targetText})${pointsText}${efficiencyText}`
-      );
+      if (verbose) {
+        console.log(
+          fmtBullet(
+            `${cat.key}: ${directionText} vs ${teamName} (${targetText})${pointsText}${efficiencyText}`
+          )
+        );
+      }
 
       if (efficiency !== null && pointsGain !== null) {
         efficiencyRows.push({
@@ -1831,12 +1875,17 @@ async function recommend() {
       const sorted = [...efficiencyRows].sort(
         (a, b) => b.efficiency - a.efficiency
       );
-      console.log("Best value (points per unit):");
-      sorted.slice(0, topLimit).forEach((row) => {
-        console.log(
-          `- ${row.key} (${row.name}): ${formatEfficiency(row.efficiency)} ${row.label}`
-        );
-      });
+      if (verbose) {
+        console.log(cYellow("Best value (points per unit):"));
+        sorted.slice(0, topLimit).forEach((row) => {
+          console.log(
+            fmtBullet(
+              `${row.key} (${row.name}): ${formatEfficiency(row.efficiency)} ${row.label}`
+            )
+          );
+        });
+        console.log("");
+      }
       bestValueTargets = sorted.slice(0, topLimit).map((row) => row.key);
     }
   }
@@ -2255,7 +2304,7 @@ async function recommend() {
     let printed = false;
     return () => {
       if (!printed) {
-        console.log("Actions:");
+        console.log(cYellow("Actions:"));
         printed = true;
       }
     };
@@ -2398,11 +2447,13 @@ async function recommend() {
       return;
     }
     printActionsHeader();
-    console.log(label);
+    console.log(cYellow(label));
     eligible.forEach(({ item, dropName }) => {
       const position = item.positions.join(", ");
       console.log(
-        `- ${item.name} ${position ? `(${position})` : ""} -> drop ${dropName}`.trim()
+        fmtBullet(
+          `${item.name} ${position ? `(${position})` : ""} -> drop ${dropName}`.trim()
+        )
       );
       addPrintedCount += 1;
       if (isPitcher === null) {
@@ -2427,35 +2478,39 @@ async function recommend() {
       addPositionCandidates.length > 0)
   ) {
     printActionsHeader();
-    console.log("ADD: none (no safe drop upgrades available).");
+    console.log(cYellow("ADD:") + " " + fmtLine("none (no safe drop upgrades available)."));
   }
 
   if (startSelections.length > 0) {
     printActionsHeader();
-    console.log(startLabel);
+    console.log(cYellow(startLabel));
     startSelections.forEach((player) => {
       const position = player.positions.join(", ");
-      console.log(`- ${player.name} ${position ? `(${position})` : ""}`.trim());
+      console.log(
+        fmtBullet(`${player.name} ${position ? `(${position})` : ""}`.trim())
+      );
       actionSuggestions.start.push(player.name);
     });
   } else if (startMessage) {
     printActionsHeader();
-    console.log(startMessage);
+    console.log(fmtLine(startMessage));
   }
 
   if (dropHeader && dropLines.length > 0) {
     printActionsHeader();
-    console.log(dropHeader);
+    console.log(cYellow(dropHeader));
     dropLines.forEach((line, idx) => {
-      console.log(line);
+      const trimmed = line.startsWith("- ") ? line.slice(2) : line;
+      console.log(fmtBullet(trimmed));
       if (dropSuggestions[idx]) {
         actionSuggestions.drop.push(dropSuggestions[idx].name);
       }
     });
   } else if (dropMessage) {
     printActionsHeader();
-    console.log(dropMessage);
+    console.log(fmtLine(dropMessage));
   }
+  console.log("");
 
   if (positionFilter === "C" && addPositionAllCandidates.length > 0) {
     const rankedCatchers = rankHittersByStats(
@@ -2463,7 +2518,7 @@ async function recommend() {
       statIdByKey,
       targetKeys
     );
-    console.log("Catcher options (live season stats):");
+    console.log(cYellow("Catcher options (live season stats):"));
     rankedCatchers.slice(0, getTopLimit(5)).forEach((candidate, idx) => {
       const statR = statIdByKey.get("R");
       const statHR = statIdByKey.get("HR");
@@ -2478,9 +2533,12 @@ async function recommend() {
         AVG: statAVG ? candidate.stats?.get(statAVG) ?? 0 : 0,
       };
       console.log(
-        `${idx + 1}. ${candidate.name} (${candidate.positions.join(", ")}) - R ${values.R}, HR ${values.HR}, RBI ${values.RBI}, SB ${values.SB}, AVG ${values.AVG}`
+        fmtLine(
+          `${idx + 1}. ${candidate.name} (${candidate.positions.join(", ")}) - R ${values.R}, HR ${values.HR}, RBI ${values.RBI}, SB ${values.SB}, AVG ${values.AVG}`
+        )
       );
     });
+    console.log("");
   }
 
   const snapshot = buildSnapshot({
@@ -2502,11 +2560,14 @@ async function recommend() {
   const actionsLog = readJsonl(ACTION_LOG);
   const snapshotsLog = readJsonl(SNAPSHOT_LOG);
   const effectivenessLines = buildEffectivenessSummary(snapshotsLog, snapshot);
-  console.log("Effectiveness since last run:");
+  console.log(cYellow("Effectiveness since last run:"));
   if (effectivenessLines && effectivenessLines.length > 0) {
-    effectivenessLines.forEach((line) => console.log(line));
+    effectivenessLines.forEach((line) => {
+      const trimmed = line.startsWith("- ") ? line.slice(2) : line;
+      console.log(fmtBullet(trimmed));
+    });
   } else {
-    console.log("- No prior snapshot to compare.");
+    console.log(fmtBullet("No prior snapshot to compare."));
   }
   const updatedLearning = evaluateActions({
     learning,
@@ -2580,7 +2641,7 @@ async function main() {
       await recommend();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|log|recommend> [--top N] [--position C]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|log|recommend> [--top N] [--position C] [--verbose]"
       );
     }
   } catch (error) {

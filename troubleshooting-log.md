@@ -267,3 +267,8 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Ran `recommend --position C` expecting catcher rankings.
     - Problem: No catcher list appeared because the free-agent list was limited and filtered by category need.
     - Solution: Added position filtering in the API request, increased the free-agent pool size for position requests, and bypassed need-based filtering when `--position` is set.
+
+50. **CLI output drifted from compact UI**
+    - Step: Compared current `recommend` output to the desired compact layout screenshot.
+    - Problem: Output included extra sections and lost the color/spacing that made it easy to scan quickly.
+    - Solution: Restored a compact, colorized layout by default and added `--verbose` to show detailed sections on demand.
