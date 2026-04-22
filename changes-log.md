@@ -33,6 +33,7 @@
 - Excluded `DTD/NA/IL` players from START suggestions.
 - Added `focusTargets` to snapshots and use it for effectiveness/learning (worst categories + best-value targets).
 - Increased free-agent pool + stats behavior when chasing saves.
+- Switched target selection to prioritize categories with the closest next point gains (derived from standings thresholds).
 - Tightened drop logic by skipping players with strong Yahoo ranks.
 - Prioritized RP adds when SV is a target for better saves streaming.
 - Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.

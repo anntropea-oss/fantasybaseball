@@ -277,3 +277,8 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Reviewed `logs/snapshots.jsonl` and `logs/daily-log.md` for target categories vs point changes.
     - Problem: Categories like `R`/`K` often improved in raw value but rarely produced point gains; `SV` stayed flat at 0.
     - Solution: Switched effectiveness/learning to track `focusTargets` (worst + best-value) and added initial save-chase plumbing (bigger FA pool + RP-first pairing) while tightening status drops to avoid `DTD` disasters.
+
+52. **Targets now prioritize point thresholds**
+    - Step: Implemented “closest next point” selection using the same standings threshold math shown in verbose mode.
+    - Problem: The recommender often chased low-point categories (e.g., `R`, `K`) without crossing the next point boundary.
+    - Solution: Default Targets are now the categories with the clearest near-term point gain; output shows what’s needed for the next point and add logic uses these targets for needs/scoring.

@@ -653,7 +653,7 @@ function buildSnapshot({
   gpCap,
   ipCap,
   resolvedCategories,
-  worstCategories,
+  targetKeys,
   bestValueTargets,
   focusKeys,
   actionSuggestions,
@@ -683,7 +683,7 @@ function buildSnapshot({
     gpCap,
     ipValue,
     ipCap,
-    targets: worstCategories.map((cat) => cat.key),
+    targets: Array.isArray(targetKeys) ? targetKeys : [],
     focusTargets: Array.isArray(focusKeys) ? focusKeys : [],
     bestValueTargets,
     categories,
@@ -1661,7 +1661,8 @@ async function recommend() {
     pointGapScores
   );
   const worstCategories = prioritizedCategories.slice(0, 3);
-  const targetKeys = worstCategories.map((cat) => cat.key);
+  const worstCategoryKeys = worstCategories.map((cat) => cat.key);
+  let targetKeys = [...worstCategoryKeys];
 
   const overallRank = findAllValuesByKey(teamData, "rank")[0];
   const today = new Date();
@@ -1759,33 +1760,9 @@ async function recommend() {
   }
   console.log("");
 
-  if (worstCategories.length > 0) {
-    console.log(cYellow("Targets (lowest ranks):"));
-    worstCategories.forEach((cat) => {
-      let targetText = "";
-      const rankLabel =
-        cat.rankSource === "points" && cat.points !== null
-          ? `~rank ${formatRank(cat.rank)} (points ${cat.points})`
-          : `rank ${formatRank(cat.rank)}`;
-      if (teamCount > 0 && cat.rank !== null) {
-        const midRank = Math.ceil(teamCount / 2);
-        const baseRank = roundRank(cat.rank);
-        const targetRank = Math.max(1, Math.min(midRank, baseRank - 2));
-        const delta = baseRank - targetRank;
-        if (delta > 0) {
-          targetText = `, target +${delta} ranks (to #${targetRank})`;
-        } else {
-          targetText = ", maintain (already top half)";
-        }
-      }
-      console.log(fmtBullet(`${cat.key} ${rankLabel}, val ${cat.value}${targetText}`));
-    });
-  } else {
-    console.log(fmtLine("Could not infer category ranks from standings."));
-  }
-  console.log("");
-
+  let pointGainTargets = [];
   let bestValueTargets = [];
+  const pointInfoByKey = new Map();
   if (teamMetrics.length > 0 && myTeamMetrics) {
     if (verbose) console.log(cYellow("Point gains (next team):"));
     const efficiencyRows = [];
@@ -1871,6 +1848,7 @@ async function recommend() {
       }
 
       if (efficiency !== null && pointsGain !== null) {
+        pointInfoByKey.set(cat.key, { pointsGain, directionText });
         efficiencyRows.push({
           key: cat.key,
           name: cat.name,
@@ -1886,6 +1864,11 @@ async function recommend() {
       const sorted = [...efficiencyRows].sort(
         (a, b) => b.efficiency - a.efficiency
       );
+      const pointSorted = [...efficiencyRows].sort((a, b) => {
+        if (b.pointsGain !== a.pointsGain) return b.pointsGain - a.pointsGain;
+        return b.efficiency - a.efficiency;
+      });
+      pointGainTargets = pointSorted.slice(0, topLimit).map((row) => row.key);
       if (verbose) {
         console.log(cYellow("Best value (points per unit):"));
         sorted.slice(0, topLimit).forEach((row) => {
@@ -1901,13 +1884,43 @@ async function recommend() {
     }
   }
 
-  const worstCategoryKeys = worstCategories.map((cat) => cat.key);
-  const focusKeys = [...new Set([...worstCategoryKeys, ...bestValueTargets])];
+  const primaryTargetKeys =
+    pointGainTargets.length > 0 ? pointGainTargets : worstCategoryKeys;
+  targetKeys = [...primaryTargetKeys];
+  const focusKeys = [...new Set([...primaryTargetKeys, ...bestValueTargets])];
   const needsSaves = focusKeys.includes("SV");
   const currentSaves = toNumber(
     resolvedCategories.find((cat) => cat.key === "SV")?.value
   );
   const savesEmergency = needsSaves && currentSaves !== null && currentSaves <= 1;
+
+  if (targetKeys.length > 0) {
+    console.log(
+      cYellow(
+        pointGainTargets.length > 0
+          ? "Targets (closest point gains):"
+          : "Targets (lowest ranks):"
+      )
+    );
+    const categoryByKey = new Map(resolvedCategories.map((cat) => [cat.key, cat]));
+    targetKeys.forEach((key) => {
+      const cat = categoryByKey.get(key);
+      if (!cat) return;
+      const rankLabel =
+        cat.rankSource === "points" && cat.points !== null
+          ? `~rank ${formatRank(cat.rank)} (points ${cat.points})`
+          : `rank ${formatRank(cat.rank)}`;
+      const info = pointInfoByKey.get(key);
+      const infoText =
+        info && info.pointsGain !== null
+          ? `, next ${info.directionText} (+${formatPoints(info.pointsGain)} pts)`
+          : "";
+      console.log(fmtBullet(`${cat.key} ${rankLabel}, val ${cat.value}${infoText}`));
+    });
+  } else {
+    console.log(fmtLine("Could not infer category ranks from standings."));
+  }
+  console.log("");
 
   let rosterState = [];
   let addBattingCandidates = [];
@@ -2616,7 +2629,7 @@ async function recommend() {
     gpCap,
     ipCap,
     resolvedCategories,
-    worstCategories,
+    targetKeys,
     bestValueTargets,
     focusKeys,
     actionSuggestions,
