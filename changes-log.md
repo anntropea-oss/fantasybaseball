@@ -27,6 +27,12 @@
 ## 2026-04-16
 - Restored compact, colorized `recommend` output layout (Summary → Targets → Actions → Effectiveness).
 - Added `--verbose` to show detailed point-gain and efficiency sections.
+
+## 2026-04-22
+- Removed `DTD` from status-based DROP suggestions (avoids nonsense drops of elite players).
+- Excluded `DTD/NA/IL` players from START suggestions.
+- Added `focusTargets` to snapshots and use it for effectiveness/learning (worst categories + best-value targets).
+- Increased free-agent pool + stats behavior when chasing saves.
 - Tightened drop logic by skipping players with strong Yahoo ranks.
 - Prioritized RP adds when SV is a target for better saves streaming.
 - Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.

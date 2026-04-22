@@ -272,3 +272,8 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Compared current `recommend` output to the desired compact layout screenshot.
     - Problem: Output included extra sections and lost the color/spacing that made it easy to scan quickly.
     - Solution: Restored a compact, colorized layout by default and added `--verbose` to show detailed sections on demand.
+
+51. **Efficiency targets not translating to points**
+    - Step: Reviewed `logs/snapshots.jsonl` and `logs/daily-log.md` for target categories vs point changes.
+    - Problem: Categories like `R`/`K` often improved in raw value but rarely produced point gains; `SV` stayed flat at 0.
+    - Solution: Switched effectiveness/learning to track `focusTargets` (worst + best-value) and added initial save-chase plumbing (bigger FA pool + RP-first pairing) while tightening status drops to avoid `DTD` disasters.

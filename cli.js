@@ -24,6 +24,8 @@ const ADD_STAT_SCORE_IMPROVEMENT = 0.5;
 const EFFECTIVENESS_DELAY_DAYS = 2;
 const FREE_AGENT_COUNT = 50;
 const FREE_AGENT_COUNT_POSITION = 200;
+const FREE_AGENT_COUNT_SAVES = 200;
+const PROTECT_TOP_YAHOO_RANK = 30;
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -553,7 +555,7 @@ function isILStatus(status) {
   return normalized.startsWith("IL") || normalized === "IR";
 }
 
-function isDropStatus(status) {
+function isUnavailableStatus(status) {
   if (!status) return false;
   const normalized = status.toString().trim().toUpperCase();
   return (
@@ -562,6 +564,13 @@ function isDropStatus(status) {
     normalized === "NA" ||
     normalized === "DTD"
   );
+}
+
+function isDropStatus(status) {
+  if (!status) return false;
+  const normalized = status.toString().trim().toUpperCase();
+  // Droppable statuses: long/unknown absences. (DTD is too noisy and can include studs.)
+  return normalized.startsWith("IL") || normalized === "IR" || normalized === "NA";
 }
 
 function isILPosition(positions) {
@@ -646,6 +655,7 @@ function buildSnapshot({
   resolvedCategories,
   worstCategories,
   bestValueTargets,
+  focusKeys,
   actionSuggestions,
   rosterState,
 }) {
@@ -674,6 +684,7 @@ function buildSnapshot({
     ipValue,
     ipCap,
     targets: worstCategories.map((cat) => cat.key),
+    focusTargets: Array.isArray(focusKeys) ? focusKeys : [],
     bestValueTargets,
     categories,
     actions: actionSuggestions,
@@ -828,7 +839,7 @@ function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
   }
   lines.push("Effectiveness:");
 
-  const targetKeys = baseSnapshot.targets || [];
+  const targetKeys = baseSnapshot.focusTargets || baseSnapshot.targets || [];
   targetKeys.forEach((key) => {
     const baseCat = baseMap.get(key);
     const curCat = currentMap.get(key);
@@ -926,7 +937,7 @@ function buildEffectivenessSummary(snapshots, currentSnapshot) {
 
   const prevMap = new Map(prevSnapshot.categories.map((cat) => [cat.key, cat]));
   const currMap = new Map(currentSnapshot.categories.map((cat) => [cat.key, cat]));
-  const targetKeys = prevSnapshot.targets || [];
+  const targetKeys = prevSnapshot.focusTargets || prevSnapshot.targets || [];
   if (targetKeys.length > 0) {
     targetKeys.forEach((key) => {
       const prevCat = prevMap.get(key);
@@ -951,7 +962,7 @@ function buildEffectivenessSummary(snapshots, currentSnapshot) {
 
 function targetsImproved(baseSnapshot, currentSnapshot) {
   if (!baseSnapshot || !currentSnapshot) return false;
-  const targetKeys = baseSnapshot.targets || [];
+  const targetKeys = baseSnapshot.focusTargets || baseSnapshot.targets || [];
   if (targetKeys.length === 0) return false;
   const currentMap = new Map(
     currentSnapshot.categories.map((cat) => [cat.key, cat])
@@ -1890,6 +1901,14 @@ async function recommend() {
     }
   }
 
+  const worstCategoryKeys = worstCategories.map((cat) => cat.key);
+  const focusKeys = [...new Set([...worstCategoryKeys, ...bestValueTargets])];
+  const needsSaves = focusKeys.includes("SV");
+  const currentSaves = toNumber(
+    resolvedCategories.find((cat) => cat.key === "SV")?.value
+  );
+  const savesEmergency = needsSaves && currentSaves !== null && currentSaves <= 1;
+
   let rosterState = [];
   let addBattingCandidates = [];
   let addPitchingCandidates = [];
@@ -1922,6 +1941,8 @@ async function recommend() {
     const topLimit = getTopLimit(3);
     const freeAgentCount = positionFilter
       ? FREE_AGENT_COUNT_POSITION
+      : needsSaves
+        ? FREE_AGENT_COUNT_SAVES
       : FREE_AGENT_COUNT;
     const positionParam = positionFilter ? `;position=${positionFilter}` : "";
     const freeAgents = await yahooRequest({
@@ -1932,8 +1953,6 @@ async function recommend() {
 
     const players = findAllValuesByKey(freeAgents, "player");
     if (players.length > 0) {
-      const worstCategoryKeys = worstCategories.map((cat) => cat.key);
-      const focusKeys = [...new Set([...worstCategoryKeys, ...bestValueTargets])];
       const battingNeeds = focusKeys.some((cat) =>
         battingCategories.includes(cat)
       );
@@ -2005,7 +2024,7 @@ async function recommend() {
           addPitchingCandidates = applyStalePenalty(
             pitchingCandidates,
             staleRecommendationNames
-          ).slice(0, topLimit);
+          ).slice(0, needsSaves && pitchingFocus.includes("SV") ? Math.max(topLimit, 40) : topLimit);
         }
 
         if (!positionFilter && !battingNeeds && !pitchingNeeds) {
@@ -2061,7 +2080,7 @@ async function recommend() {
     const activeCatchers = mappedPlayers.filter(
       (player) =>
         isCatcherPositions(player.positions) &&
-        !isDropStatus(player.status) &&
+        !isUnavailableStatus(player.status) &&
         !player.isIL
     );
     const canDropCatcher = (player) => {
@@ -2100,15 +2119,18 @@ async function recommend() {
     }
 
     if (benchPlayers.length > 0) {
-      const battingNeeds = worstCategories.some((cat) =>
-        battingCategories.includes(cat.key)
-      );
-      const pitchingNeeds = worstCategories.some((cat) =>
-        pitchingCategories.includes(cat.key)
+      const dropRankFloorPrimary = savesEmergency ? 60 : DROP_RANK_FLOOR;
+      const dropRankFloorSecondary = savesEmergency
+        ? 40
+        : DROP_RANK_FLOOR_SECONDARY;
+      const battingNeeds = focusKeys.some((key) => battingCategories.includes(key));
+      const pitchingNeeds = focusKeys.some((key) =>
+        pitchingCategories.includes(key)
       );
 
       let startCandidates = benchPlayers
         .filter((player) => !player.isIL)
+        .filter((player) => !isUnavailableStatus(player.status))
         .filter((player) =>
         battingNeeds && pitchingNeeds
           ? true
@@ -2121,7 +2143,9 @@ async function recommend() {
       startCandidates = applyStalePenalty(startCandidates, staleRecommendationNames);
       if (startCandidates.length === 0 && benchPlayers.length > 0) {
         startCandidates = applyStalePenalty(
-          benchPlayers.filter((player) => !player.isIL),
+          benchPlayers
+            .filter((player) => !player.isIL)
+            .filter((player) => !isUnavailableStatus(player.status)),
           staleRecommendationNames
         ).sort((a, b) => {
           if (a.rank === null && b.rank === null) return 0;
@@ -2142,24 +2166,25 @@ async function recommend() {
 
       const startKeys = new Set(startSelections.map((player) => playerKey(player)));
       const benchWithRank = allBenchPlayers.filter((player) => player.rank !== null);
+      const isProtectedBenchPlayer = (player) =>
+        player.rank !== null && player.rank <= PROTECT_TOP_YAHOO_RANK;
       const dropPool = allBenchPlayers.filter(
         (player) =>
           !startKeys.has(playerKey(player)) &&
           !doNotDrop.has(player.name.toLowerCase()) &&
           canDropCatcher(player) &&
-          (player.rank === null || player.rank >= DROP_RANK_FLOOR) &&
+          !isProtectedBenchPlayer(player) &&
+          (savesEmergency
+            ? true
+            : player.rank === null || player.rank >= dropRankFloorPrimary) &&
           !(player.isPitcher && player.positions.includes("SP") && player.rank === null)
       );
       const statKeysForType = (isPitcher) =>
         isPitcher ? pitchingCategories : battingCategories;
       const weakKeysForType = (isPitcher) => {
-        const weak = worstCategories
-          .map((cat) => cat.key)
-          .filter((key) =>
-            isPitcher
-              ? pitchingCategories.includes(key)
-              : battingCategories.includes(key)
-          );
+        const weak = focusKeys.filter((key) =>
+          isPitcher ? pitchingCategories.includes(key) : battingCategories.includes(key)
+        );
         return weak.length > 0 ? weak : statKeysForType(isPitcher);
       };
 
@@ -2168,7 +2193,7 @@ async function recommend() {
         (player) => !startKeys.has(playerKey(player))
       );
       if (statusCandidates.length > 0) {
-        dropHeader = "DROP (status: NA/DTD/IL):";
+        dropHeader = "DROP (status: NA/IL):";
         statusCandidates.slice(0, topLimit).forEach((player) => {
           const position = player.positions.join(", ");
           const statusText = player.status ? `${player.status}` : "STATUS";
@@ -2238,7 +2263,9 @@ async function recommend() {
               (player) =>
                 !startKeys.has(playerKey(player)) &&
                 !doNotDrop.has(player.name.toLowerCase()) &&
-                player.rank >= DROP_RANK_FLOOR
+                (savesEmergency
+                  ? !isProtectedBenchPlayer(player)
+                  : player.rank >= dropRankFloorPrimary)
             )
             .sort((a, b) => b.rank - a.rank),
           staleRecommendationNames
@@ -2268,8 +2295,9 @@ async function recommend() {
               (player) =>
                 !startKeys.has(playerKey(player)) &&
                 !doNotDrop.has(player.name.toLowerCase()) &&
-                player.rank >= DROP_RANK_FLOOR_SECONDARY &&
-                player.rank < DROP_RANK_FLOOR
+                !savesEmergency &&
+                player.rank >= dropRankFloorSecondary &&
+                player.rank < dropRankFloorPrimary
             )
             .sort((a, b) => b.rank - a.rank),
           staleRecommendationNames
@@ -2318,11 +2346,20 @@ async function recommend() {
   const dropPitchersQueue = dropSuggestions
     .filter((drop) => drop.isPitcher)
     .map((d) => ({ ...d }));
+  const takeAnyDropName = () => {
+    if (dropHittersQueue.length > 0) return dropHittersQueue.shift().name;
+    if (dropPitchersQueue.length > 0) return dropPitchersQueue.shift().name;
+    return null;
+  };
   const findMatchingDrop = (candidate, isPitcher) => {
     if (!candidate) return null;
     const queue = isPitcher ? dropPitchersQueue : dropHittersQueue;
     for (let i = 0; i < queue.length; i += 1) {
       const drop = queue[i];
+      if (savesEmergency && needsSaves && isPitcher && candidate?.positions?.includes("RP")) {
+        queue.splice(i, 1);
+        return drop.name;
+      }
       if (drop.statusDrop && candidate.rank !== null && candidate.rank !== undefined) {
         queue.splice(i, 1);
         return drop.name;
@@ -2383,7 +2420,7 @@ async function recommend() {
       const addStatsResult = await fetchPlayerStatsByKeys({
         accessToken,
         playerKeys: addKeys,
-        statTypeOverride: positionFilter ? "season" : null,
+        statTypeOverride: positionFilter || needsSaves ? "season" : null,
       });
       if (addStatsResult.hasStats) {
         const applyAddStats = (candidate) => ({
@@ -2417,6 +2454,23 @@ async function recommend() {
     ...candidate,
     statsScore: addScoreFor(candidate, true),
   }));
+  if (needsSaves && addPitchingCandidates.length > 0) {
+    const svId = statIdByKey.get("SV");
+    if (svId) {
+      addPitchingCandidates = [...addPitchingCandidates].sort((a, b) => {
+        const aIsRp = a.positions?.includes("RP");
+        const bIsRp = b.positions?.includes("RP");
+        if (aIsRp !== bIsRp) return aIsRp ? -1 : 1;
+        const aSv = a.stats?.get(svId) ?? 0;
+        const bSv = b.stats?.get(svId) ?? 0;
+        if (aSv !== bSv) return bSv - aSv;
+        const aRank = a.rank ?? Number.POSITIVE_INFINITY;
+        const bRank = b.rank ?? Number.POSITIVE_INFINITY;
+        return aRank - bRank;
+      });
+      addPitchingCandidates = addPitchingCandidates.slice(0, getTopLimit(3));
+    }
+  }
   addGeneralCandidates = addGeneralCandidates.map((candidate) => ({
     ...candidate,
     statsScore: addScoreFor(candidate, candidate.isPitcher),
@@ -2435,13 +2489,19 @@ async function recommend() {
     if (!candidates || candidates.length === 0) return;
     if (!label) return;
     const eligible = candidates
-      .map((item) => ({
-        item,
-        dropName:
-          isPitcher === null
+      .map((item) => {
+        const allowCrossTypeForSaves =
+          savesEmergency &&
+          needsSaves &&
+          isPitcher === true &&
+          item?.positions?.includes("RP");
+        const dropName = allowCrossTypeForSaves
+          ? takeAnyDropName()
+          : isPitcher === null
             ? findMatchingDropGeneral(item)
-            : findMatchingDrop(item, isPitcher),
-      }))
+            : findMatchingDrop(item, isPitcher);
+        return { item, dropName };
+      })
       .filter((pair) => pair.dropName);
     if (eligible.length === 0) {
       return;
@@ -2466,8 +2526,14 @@ async function recommend() {
     });
   };
 
-  printAddCandidates(addBattingLabel, addBattingCandidates, false);
-  printAddCandidates(addPitchingLabel, addPitchingCandidates, true);
+  if (savesEmergency) {
+    // When we're at/near zero saves, spend our limited drop slots on RP adds first.
+    printAddCandidates(addPitchingLabel, addPitchingCandidates, true);
+    printAddCandidates(addBattingLabel, addBattingCandidates, false);
+  } else {
+    printAddCandidates(addBattingLabel, addBattingCandidates, false);
+    printAddCandidates(addPitchingLabel, addPitchingCandidates, true);
+  }
   printAddCandidates(addGeneralLabel, addGeneralCandidates, null);
   printAddCandidates(addPositionLabel, addPositionCandidates, addPositionIsPitcher);
   if (
@@ -2552,6 +2618,7 @@ async function recommend() {
     resolvedCategories,
     worstCategories,
     bestValueTargets,
+    focusKeys,
     actionSuggestions,
     rosterState,
   });
