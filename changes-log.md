@@ -34,6 +34,10 @@
 - Added `focusTargets` to snapshots and use it for effectiveness/learning (worst categories + best-value targets).
 - Increased free-agent pool + stats behavior when chasing saves.
 - Switched target selection to prioritize categories with the closest next point gains (derived from standings thresholds).
+
+## 2026-04-24
+- Added 5-year MLB season-history blending for player evaluation (stabilizes projections using Yahoo season stats).
+- Replaced raw stat scoring with history-stabilized projected z-scores for add/drop decisioning.
 - Tightened drop logic by skipping players with strong Yahoo ranks.
 - Prioritized RP adds when SV is a target for better saves streaming.
 - Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.

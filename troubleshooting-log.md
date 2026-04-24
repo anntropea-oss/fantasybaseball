@@ -282,3 +282,8 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Implemented “closest next point” selection using the same standings threshold math shown in verbose mode.
     - Problem: The recommender often chased low-point categories (e.g., `R`, `K`) without crossing the next point boundary.
     - Solution: Default Targets are now the categories with the clearest near-term point gain; output shows what’s needed for the next point and add logic uses these targets for needs/scoring.
+
+53. **Use 5-year history to reduce small-sample noise**
+    - Step: Added season-history fetch for the last 5 MLB seasons for candidate players.
+    - Problem: Recommendations were overly sensitive to short-term stats and missing ranks.
+    - Solution: Blend current season rates with 5-year priors (per-AB/per-IP) and score candidates via projected z-scores for add/drop matching.

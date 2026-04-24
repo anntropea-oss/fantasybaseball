@@ -26,6 +26,10 @@ const FREE_AGENT_COUNT = 50;
 const FREE_AGENT_COUNT_POSITION = 200;
 const FREE_AGENT_COUNT_SAVES = 200;
 const PROTECT_TOP_YAHOO_RANK = 30;
+const HISTORY_SEASONS = 5;
+const HITTER_STABILIZER_AB = 200;
+const PITCHER_STABILIZER_IP = 30;
+const MAX_HISTORY_KEYS = 80;
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -108,6 +112,27 @@ function ensureLogDir() {
 function appendJsonl(filePath, payload) {
   ensureLogDir();
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`);
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function uniqueLimit(items, max) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (!item) continue;
+    if (seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 function readJsonl(filePath) {
@@ -634,6 +659,56 @@ async function fetchPlayerStatsByKeys({ accessToken, playerKeys, statTypeOverrid
   return { statsByKey: new Map(), statType: null, hasStats: false };
 }
 
+async function fetchPlayerSeasonStatsByKeys({ accessToken, playerKeys, season }) {
+  if (!playerKeys || playerKeys.length === 0) {
+    return { statsByKey: new Map(), season, hasStats: false };
+  }
+  const statsByKey = new Map();
+  const chunks = chunkArray(playerKeys, 25);
+  for (const chunk of chunks) {
+    const keyParam = encodeURIComponent(chunk.join(","));
+    const data = await yahooRequest({
+      url: `${FANTASY_API_BASE}/players;player_keys=${keyParam}/stats;type=season;season=${season}?format=json`,
+      accessToken,
+    });
+    writeDebugJson(`player-stats-season-${season}`, data);
+    const playerNodes = findAllValuesByKey(data, "player");
+    playerNodes.forEach((player) => {
+      const key = extractPlayerKey(player);
+      if (!key) return;
+      const stats = extractPlayerStats(player);
+      if (stats.size > 0) {
+        statsByKey.set(key, stats);
+      }
+    });
+  }
+  return { statsByKey, season, hasStats: statsByKey.size > 0 };
+}
+
+async function fetchPlayerHistory({ accessToken, playerKeys, endSeasonYear, seasonsBack }) {
+  const years = [];
+  for (let i = 1; i <= seasonsBack; i += 1) {
+    years.push(endSeasonYear - i);
+  }
+  const byKey = new Map();
+  for (const year of years) {
+    try {
+      const result = await fetchPlayerSeasonStatsByKeys({
+        accessToken,
+        playerKeys,
+        season: year,
+      });
+      result.statsByKey.forEach((stats, key) => {
+        if (!byKey.has(key)) byKey.set(key, new Map());
+        byKey.get(key).set(year, stats);
+      });
+    } catch {
+      // ignore missing historical season responses
+    }
+  }
+  return byKey;
+}
+
 function buildStatIdByKey(resolvedCategories) {
   const map = new Map();
   resolvedCategories.forEach((cat) => {
@@ -1014,6 +1089,137 @@ function computeStatScore(statsMap, statKeys, statIdByKey) {
     score += isLowerBetter(key, key) ? -value : value;
   });
   return hasStat ? score : null;
+}
+
+function safeMeanStd(values) {
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (clean.length === 0) return { mean: 0, std: 1 };
+  const mean = clean.reduce((s, v) => s + v, 0) / clean.length;
+  const variance =
+    clean.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / clean.length;
+  const std = Math.sqrt(variance) || 1;
+  return { mean, std };
+}
+
+function isRateStat(statKey) {
+  return ["AVG", "ERA", "WHIP"].includes(statKey);
+}
+
+function expectedRate({
+  statKey,
+  statId,
+  isPitcher,
+  currentStats,
+  historySeasonStats,
+  sampleStatId,
+}) {
+  const currentValueRaw = currentStats?.get(statId);
+  const currentValue = toNumber(currentValueRaw);
+  const currentSample = sampleStatId ? toNumber(currentStats?.get(sampleStatId)) : null;
+
+  const historyEntries = [];
+  if (historySeasonStats && historySeasonStats instanceof Map) {
+    historySeasonStats.forEach((seasonStats) => {
+      if (!(seasonStats instanceof Map)) return;
+      const value = toNumber(seasonStats.get(statId));
+      if (value === null) return;
+      let sample = null;
+      if (!isRateStat(statKey) && sampleStatId) {
+        sample = toNumber(seasonStats.get(sampleStatId));
+      }
+      historyEntries.push({ value, sample });
+    });
+  }
+
+  // Prior: weighted by AB/IP for counting stats; simple average for rate stats.
+  let prior = null;
+  let priorSampleTotal = 0;
+  if (historyEntries.length > 0) {
+    if (isRateStat(statKey)) {
+      const vals = historyEntries.map((e) => e.value);
+      prior = vals.reduce((s, v) => s + v, 0) / vals.length;
+    } else {
+      if (!sampleStatId) {
+        const vals = historyEntries.map((e) => e.value);
+        prior = vals.reduce((s, v) => s + v, 0) / vals.length;
+      } else {
+      let weightedSum = 0;
+      let weightTotal = 0;
+      historyEntries.forEach((e) => {
+        const w = Number.isFinite(e.sample) && e.sample > 0 ? e.sample : 0;
+        if (w <= 0) return;
+        weightedSum += (e.value / w) * w;
+        weightTotal += w;
+      });
+      if (weightTotal > 0) {
+        prior = weightedSum / weightTotal;
+        priorSampleTotal = weightTotal;
+      }
+      }
+    }
+  }
+
+  if (currentValue === null && prior === null) return null;
+
+  // Current: convert counting stats to per-sample rate.
+  let currentRate = null;
+  if (currentValue !== null) {
+    if (isRateStat(statKey)) {
+      currentRate = currentValue;
+    } else if (!sampleStatId) {
+      currentRate = currentValue;
+    } else if (currentSample !== null && currentSample > 0) {
+      currentRate = currentValue / currentSample;
+    }
+  }
+
+  if (prior === null) return currentRate;
+  if (currentRate === null) return prior;
+
+  const stabilizer = isPitcher ? PITCHER_STABILIZER_IP : HITTER_STABILIZER_AB;
+  const sample = currentSample !== null && currentSample > 0 ? currentSample : 0;
+  const w = sampleStatId ? sample / (sample + stabilizer) : 0.5;
+  return w * currentRate + (1 - w) * prior;
+}
+
+function computeProjectedZScore({
+  playerKey,
+  isPitcher,
+  statKeys,
+  statIdByKey,
+  currentSeasonStatsByKey,
+  historyByKey,
+  abStatId,
+  ipStatId,
+  zContext,
+}) {
+  if (!playerKey) return null;
+  const currentStats = currentSeasonStatsByKey.get(playerKey) || null;
+  const historySeasonStats = historyByKey.get(playerKey) || null;
+  const sampleStatId = isPitcher ? ipStatId : abStatId;
+  let score = 0;
+  let hasAny = false;
+  statKeys.forEach((key) => {
+    const statId = statIdByKey.get(key);
+    if (!statId) return;
+    const val = expectedRate({
+      statKey: key,
+      statId,
+      isPitcher,
+      currentStats,
+      historySeasonStats,
+      sampleStatId,
+    });
+    if (val === null || val === undefined) return;
+    hasAny = true;
+    const ctx = zContext.get(key);
+    if (!ctx) return;
+    let z = (val - ctx.mean) / (ctx.std || 1);
+    if (isLowerBetter(key, key)) z = -z;
+    const weight = ctx.weight || 1;
+    score += weight * z;
+  });
+  return hasAny ? score : null;
 }
 
 function rankHittersByStats(candidates, statIdByKey, targetKeys) {
@@ -1632,6 +1838,7 @@ async function recommend() {
   });
 
   const statIdByKey = buildStatIdByKey(resolvedCategories);
+  const abStatId = resolveStatIdByAliases(statNameMap, ["At Bats", "AB"]);
   const statIdsForTotals = resolvedCategories
     .map((cat) => cat.statId)
     .filter(Boolean);
@@ -2215,6 +2422,7 @@ async function recommend() {
           );
           dropSuggestions.push({
             name: player.name,
+            playerKey: player.playerKey,
             isPitcher: player.isPitcher,
             rank: player.rank,
             statusDrop: true,
@@ -2259,6 +2467,7 @@ async function recommend() {
             );
             dropSuggestions.push({
               name: player.name,
+              playerKey: player.playerKey,
               isPitcher: player.isPitcher,
               rank: player.rank,
               statsScore: player.score,
@@ -2293,6 +2502,7 @@ async function recommend() {
             );
             dropSuggestions.push({
               name: player.name,
+              playerKey: player.playerKey,
               isPitcher: player.isPitcher,
               rank: player.rank,
               statusDrop: false,
@@ -2325,6 +2535,7 @@ async function recommend() {
             );
             dropSuggestions.push({
               name: player.name,
+              playerKey: player.playerKey,
               isPitcher: player.isPitcher,
               rank: player.rank,
               statusDrop: false,
@@ -2351,12 +2562,10 @@ async function recommend() {
     };
   })();
 
-  const dropHitters = dropSuggestions.filter((drop) => !drop.isPitcher).map((d) => d.name);
-  const dropPitchers = dropSuggestions.filter((drop) => drop.isPitcher).map((d) => d.name);
-  const dropHittersQueue = dropSuggestions
+  let dropHittersQueue = dropSuggestions
     .filter((drop) => !drop.isPitcher)
     .map((d) => ({ ...d }));
-  const dropPitchersQueue = dropSuggestions
+  let dropPitchersQueue = dropSuggestions
     .filter((drop) => drop.isPitcher)
     .map((d) => ({ ...d }));
   const takeAnyDropName = () => {
@@ -2387,9 +2596,18 @@ async function recommend() {
         drop.rank !== null &&
         drop.rank !== undefined
       ) {
-        if (!isMeaningfulUpgrade(candidate.rank, drop.rank)) continue;
-        queue.splice(i, 1);
-        return drop.name;
+        const rankOk = isMeaningfulUpgrade(candidate.rank, drop.rank);
+        const statOk =
+          candidate.statsScore !== null &&
+          candidate.statsScore !== undefined &&
+          drop.statsScore !== null &&
+          drop.statsScore !== undefined &&
+          candidate.statsScore - drop.statsScore >= ADD_STAT_SCORE_IMPROVEMENT;
+        if (rankOk || statOk) {
+          queue.splice(i, 1);
+          return drop.name;
+        }
+        continue;
       }
       if (
         candidate.statsScore !== null &&
@@ -2425,27 +2643,23 @@ async function recommend() {
     ...addPositionCandidates,
     ...addPositionAllCandidates,
   ];
-  if (allAddCandidates.length > 0) {
-    const addKeys = allAddCandidates
-      .map((candidate) => candidate.playerKey)
-      .filter(Boolean);
-    if (addKeys.length > 0) {
-      const addStatsResult = await fetchPlayerStatsByKeys({
-        accessToken,
-        playerKeys: addKeys,
-        statTypeOverride: positionFilter || needsSaves ? "season" : null,
+  const addKeys = allAddCandidates.map((candidate) => candidate.playerKey).filter(Boolean);
+  if (addKeys.length > 0) {
+    const addStatsResult = await fetchPlayerStatsByKeys({
+      accessToken,
+      playerKeys: addKeys,
+      statTypeOverride: "season",
+    });
+    if (addStatsResult.hasStats) {
+      const applyAddStats = (candidate) => ({
+        ...candidate,
+        stats: addStatsResult.statsByKey.get(candidate.playerKey) || new Map(),
       });
-      if (addStatsResult.hasStats) {
-        const applyAddStats = (candidate) => ({
-          ...candidate,
-          stats: addStatsResult.statsByKey.get(candidate.playerKey) || new Map(),
-        });
-        addBattingCandidates = addBattingCandidates.map(applyAddStats);
-        addPitchingCandidates = addPitchingCandidates.map(applyAddStats);
-        addGeneralCandidates = addGeneralCandidates.map(applyAddStats);
-        addPositionCandidates = addPositionCandidates.map(applyAddStats);
-        addPositionAllCandidates = addPositionAllCandidates.map(applyAddStats);
-      }
+      addBattingCandidates = addBattingCandidates.map(applyAddStats);
+      addPitchingCandidates = addPitchingCandidates.map(applyAddStats);
+      addGeneralCandidates = addGeneralCandidates.map(applyAddStats);
+      addPositionCandidates = addPositionCandidates.map(applyAddStats);
+      addPositionAllCandidates = addPositionAllCandidates.map(applyAddStats);
     }
   }
 
@@ -2453,55 +2667,164 @@ async function recommend() {
     battingFocusKeys.length > 0 ? battingFocusKeys : battingCategories;
   const pitchingStatKeys =
     pitchingFocusKeys.length > 0 ? pitchingFocusKeys : pitchingCategories;
-  const addScoreFor = (candidate, isPitcher) =>
+  const projectedAddKeys = [
+    ...addBattingCandidates,
+    ...addPitchingCandidates,
+    ...addGeneralCandidates,
+    ...addPositionCandidates,
+    ...(positionFilter === "C" ? addPositionAllCandidates.slice(0, 25) : []),
+  ]
+    .map((candidate) => candidate.playerKey)
+    .filter(Boolean);
+  const projectionKeys = uniqueLimit(
+    [...projectedAddKeys, ...dropSuggestions.map((drop) => drop.playerKey).filter(Boolean)],
+    MAX_HISTORY_KEYS
+  );
+  let currentSeasonStatsByKey = new Map();
+  let historyByKey = new Map();
+  if (projectionKeys.length > 0) {
+    const currentSeasonResult = await fetchPlayerStatsByKeys({
+      accessToken,
+      playerKeys: projectionKeys,
+      statTypeOverride: "season",
+    });
+    currentSeasonStatsByKey = currentSeasonResult.statsByKey || new Map();
+    try {
+      const year = new Date().getFullYear();
+      historyByKey = await fetchPlayerHistory({
+        accessToken,
+        playerKeys: projectionKeys,
+        endSeasonYear: year,
+        seasonsBack: HISTORY_SEASONS,
+      });
+    } catch {
+      historyByKey = new Map();
+    }
+  }
+
+  const hitterPoolKeys = uniqueLimit(
+    [
+      ...allAddCandidates.filter((c) => !c.isPitcher).map((c) => c.playerKey),
+      ...dropSuggestions.filter((d) => !d.isPitcher).map((d) => d.playerKey),
+    ].filter(Boolean),
+    MAX_HISTORY_KEYS
+  );
+  const pitcherPoolKeys = uniqueLimit(
+    [
+      ...allAddCandidates.filter((c) => c.isPitcher).map((c) => c.playerKey),
+      ...dropSuggestions.filter((d) => d.isPitcher).map((d) => d.playerKey),
+    ].filter(Boolean),
+    MAX_HISTORY_KEYS
+  );
+
+  const buildZContext = (statKeys, isPitcher, poolKeys) => {
+    const ctx = new Map();
+    statKeys.forEach((key) => {
+      const statId = statIdByKey.get(key);
+      if (!statId) return;
+      const sampleStatId = isPitcher ? ipStatId : abStatId;
+      const vals = poolKeys
+        .map((pk) =>
+          expectedRate({
+            statKey: key,
+            statId,
+            isPitcher,
+            currentStats: currentSeasonStatsByKey.get(pk) || null,
+            historySeasonStats: historyByKey.get(pk) || null,
+            sampleStatId,
+          })
+        )
+        .filter((v) => v !== null && v !== undefined)
+        .map((v) => Number(v));
+      const { mean, std } = safeMeanStd(vals);
+      const weight = targetKeys.includes(key) ? 1.5 : 1;
+      ctx.set(key, { mean, std, weight });
+    });
+    return ctx;
+  };
+
+  const hitterZ = buildZContext(battingStatKeys, false, hitterPoolKeys);
+  const pitcherZ = buildZContext(pitchingStatKeys, true, pitcherPoolKeys);
+
+  const fallbackScore = (candidate, isPitcher) =>
     computeStatScore(
       candidate.stats,
       isPitcher ? pitchingStatKeys : battingStatKeys,
       statIdByKey
     );
-  addBattingCandidates = addBattingCandidates.map((candidate) => ({
-    ...candidate,
-    statsScore: addScoreFor(candidate, false),
-  }));
-  addPitchingCandidates = addPitchingCandidates.map((candidate) => ({
-    ...candidate,
-    statsScore: addScoreFor(candidate, true),
-  }));
-  if (needsSaves && addPitchingCandidates.length > 0) {
-    const svId = statIdByKey.get("SV");
-    if (svId) {
-      addPitchingCandidates = [...addPitchingCandidates].sort((a, b) => {
-        const aIsRp = a.positions?.includes("RP");
-        const bIsRp = b.positions?.includes("RP");
-        if (aIsRp !== bIsRp) return aIsRp ? -1 : 1;
-        const aSv = a.stats?.get(svId) ?? 0;
-        const bSv = b.stats?.get(svId) ?? 0;
-        if (aSv !== bSv) return bSv - aSv;
-        const aRank = a.rank ?? Number.POSITIVE_INFINITY;
-        const bRank = b.rank ?? Number.POSITIVE_INFINITY;
-        return aRank - bRank;
-      });
-      addPitchingCandidates = addPitchingCandidates.slice(0, getTopLimit(3));
-    }
-  }
-  addGeneralCandidates = addGeneralCandidates.map((candidate) => ({
-    ...candidate,
-    statsScore: addScoreFor(candidate, candidate.isPitcher),
-  }));
-  addPositionCandidates = addPositionCandidates.map((candidate) => ({
-    ...candidate,
-    statsScore: addScoreFor(candidate, addPositionIsPitcher ?? candidate.isPitcher),
-  }));
-  addPositionAllCandidates = addPositionAllCandidates.map((candidate) => ({
-    ...candidate,
-    statsScore: addScoreFor(candidate, addPositionIsPitcher ?? candidate.isPitcher),
-  }));
+
+  const applyProjected = (candidate, isPitcher) => {
+    const zContext = isPitcher ? pitcherZ : hitterZ;
+    const projected = computeProjectedZScore({
+      playerKey: candidate.playerKey,
+      isPitcher,
+      statKeys: isPitcher ? pitchingStatKeys : battingStatKeys,
+      statIdByKey,
+      currentSeasonStatsByKey,
+      historyByKey,
+      abStatId,
+      ipStatId,
+      zContext,
+    });
+    return {
+      ...candidate,
+      statsScore: projected !== null && projected !== undefined ? projected : fallbackScore(candidate, isPitcher),
+    };
+  };
+
+  addBattingCandidates = addBattingCandidates.map((c) => applyProjected(c, false));
+  addPitchingCandidates = addPitchingCandidates.map((c) => applyProjected(c, true));
+  addGeneralCandidates = addGeneralCandidates.map((c) =>
+    applyProjected(c, c.isPitcher)
+  );
+  addPositionCandidates = addPositionCandidates.map((c) =>
+    applyProjected(c, addPositionIsPitcher ?? c.isPitcher)
+  );
+  addPositionAllCandidates = addPositionAllCandidates.map((c) =>
+    applyProjected(c, addPositionIsPitcher ?? c.isPitcher)
+  );
+
+  dropSuggestions = dropSuggestions.map((drop) => {
+    if (!drop.playerKey) return drop;
+    const isPitcher = !!drop.isPitcher;
+    const zContext = isPitcher ? pitcherZ : hitterZ;
+    const projected = computeProjectedZScore({
+      playerKey: drop.playerKey,
+      isPitcher,
+      statKeys: isPitcher ? pitchingStatKeys : battingStatKeys,
+      statIdByKey,
+      currentSeasonStatsByKey,
+      historyByKey,
+      abStatId,
+      ipStatId,
+      zContext,
+    });
+    return {
+      ...drop,
+      statsScore:
+        projected !== null && projected !== undefined ? projected : drop.statsScore,
+    };
+  });
+
+  // Rebuild queues now that drop suggestions may have history-informed statsScore.
+  dropHittersQueue = dropSuggestions
+    .filter((drop) => !drop.isPitcher)
+    .map((d) => ({ ...d }));
+  dropPitchersQueue = dropSuggestions
+    .filter((drop) => drop.isPitcher)
+    .map((d) => ({ ...d }));
 
   let addPrintedCount = 0;
   const printAddCandidates = (label, candidates, isPitcher) => {
     if (!candidates || candidates.length === 0) return;
     if (!label) return;
-    const eligible = candidates
+    const ordered = [...candidates].sort((a, b) => {
+      const aScore = a.statsScore ?? Number.NEGATIVE_INFINITY;
+      const bScore = b.statsScore ?? Number.NEGATIVE_INFINITY;
+      if (aScore === bScore) return 0;
+      return bScore - aScore;
+    });
+    const eligible = ordered
       .map((item) => {
         const allowCrossTypeForSaves =
           savesEmergency &&
