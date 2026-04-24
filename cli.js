@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import readline from "readline";
+import { execFileSync } from "child_process";
 import { loadTokens, saveTokens, yahooRequest, refreshTokens, isTokenExpired } from "./yahoo-api.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -103,6 +104,24 @@ async function promptList(question) {
 function shouldPromptForLog() {
   if (process.env.FANTASY_LOG_PROMPT === "1") return true;
   return false;
+}
+
+function shouldGenerateDashboard() {
+  if (process.argv.includes("--no-dashboard")) return false;
+  if (process.env.FANTASY_DASHBOARD === "0") return false;
+  return true;
+}
+
+function generateDashboard() {
+  if (!shouldGenerateDashboard()) return;
+  try {
+    const scriptPath = path.join(__dirname, "scripts", "dashboard.mjs");
+    execFileSync(process.execPath, [scriptPath, "--days", "30", "--daily"], {
+      stdio: "ignore",
+    });
+  } catch {
+    // Best-effort: dashboard should never break recommend.
+  }
 }
 
 function ensureLogDir() {
@@ -2979,6 +2998,7 @@ async function recommend() {
     currentSnapshot: snapshot,
   });
   saveLearning(updatedLearning);
+  generateDashboard();
 
   if (shouldPromptForLog()) {
     const shouldLog = await promptYesNo("Log actions you actually made? (y/n): ");

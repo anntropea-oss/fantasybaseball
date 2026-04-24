@@ -38,6 +38,7 @@
 ## 2026-04-24
 - Added 5-year MLB season-history blending for player evaluation (stabilizes projections using Yahoo season stats).
 - Replaced raw stat scoring with history-stabilized projected z-scores for add/drop decisioning.
+- Added auto-generated visual dashboard at /Users/atropea/coding/fantasy baseball/fantasy/logs/dashboard.html.
 - Tightened drop logic by skipping players with strong Yahoo ranks.
 - Prioritized RP adds when SV is a target for better saves streaming.
 - Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.

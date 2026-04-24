@@ -287,3 +287,8 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Added season-history fetch for the last 5 MLB seasons for candidate players.
     - Problem: Recommendations were overly sensitive to short-term stats and missing ranks.
     - Solution: Blend current season rates with 5-year priors (per-AB/per-IP) and score candidates via projected z-scores for add/drop matching.
+
+54. **Add visual tracker dashboard**
+    - Step: Generated a local HTML dashboard from `logs/snapshots.jsonl`.
+    - Problem: Needed a graphical way to track regression + effectiveness trends over time.
+    - Solution: Added `scripts/dashboard.mjs` to build `logs/dashboard.html`, and `recommend` now refreshes it automatically.
