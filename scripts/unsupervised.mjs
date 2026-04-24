@@ -13,6 +13,9 @@ function parseArgs(argv) {
     horizonDays: 1,
     kMin: 2,
     kMax: 6,
+    knnMin: 3,
+    knnMax: 15,
+    minTrain: 10,
     write: true,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -36,6 +39,18 @@ function parseArgs(argv) {
     } else if (a === "--k-max") {
       const v = Number(argv[i + 1]);
       if (Number.isFinite(v) && v >= 2) args.kMax = Math.floor(v);
+      i += 1;
+    } else if (a === "--knn-min") {
+      const v = Number(argv[i + 1]);
+      if (Number.isFinite(v) && v >= 1) args.knnMin = Math.floor(v);
+      i += 1;
+    } else if (a === "--knn-max") {
+      const v = Number(argv[i + 1]);
+      if (Number.isFinite(v) && v >= 1) args.knnMax = Math.floor(v);
+      i += 1;
+    } else if (a === "--min-train") {
+      const v = Number(argv[i + 1]);
+      if (Number.isFinite(v) && v >= 5) args.minTrain = Math.floor(v);
       i += 1;
     } else if (a === "--no-write") {
       args.write = false;
@@ -111,6 +126,48 @@ function sumFocusPoints(snapshot) {
   if (!Array.isArray(keys) || keys.length === 0) return 0;
   const by = new Map((snapshot.categories || []).map((c) => [c.key, c]));
   return keys.reduce((sum, k) => sum + (toNumber(by.get(k)?.points) ?? 0), 0);
+}
+
+function mean(arr) {
+  if (!arr || arr.length === 0) return 0;
+  return arr.reduce((s, v) => s + v, 0) / arr.length;
+}
+
+function mae(y, yHat) {
+  if (!y || y.length === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < y.length; i += 1) s += Math.abs(y[i] - yHat[i]);
+  return s / y.length;
+}
+
+function r2(y, yHat) {
+  if (!y || y.length === 0) return 0;
+  const m = mean(y);
+  let ssTot = 0;
+  let ssRes = 0;
+  for (let i = 0; i < y.length; i += 1) {
+    ssTot += Math.pow(y[i] - m, 2);
+    ssRes += Math.pow(y[i] - yHat[i], 2);
+  }
+  return ssTot > 0 ? 1 - ssRes / ssTot : 0;
+}
+
+function corr(y, yHat) {
+  if (!y || y.length === 0) return 0;
+  const my = mean(y);
+  const mh = mean(yHat);
+  let num = 0;
+  let dy = 0;
+  let dh = 0;
+  for (let i = 0; i < y.length; i += 1) {
+    const ay = y[i] - my;
+    const ah = yHat[i] - mh;
+    num += ay * ah;
+    dy += ay * ay;
+    dh += ah * ah;
+  }
+  const denom = Math.sqrt(dy * dh) || 1;
+  return num / denom;
 }
 
 function featureConfig(name, options) {
@@ -212,6 +269,19 @@ function kmeans(Z, k, { nInit = 20, maxIter = 80, seed = 42 } = {}) {
   return best;
 }
 
+function assignToCenters(z, centers) {
+  let bestJ = 0;
+  let bestD = Infinity;
+  for (let j = 0; j < centers.length; j += 1) {
+    const d = dist2(z, centers[j]);
+    if (d < bestD) {
+      bestD = d;
+      bestJ = j;
+    }
+  }
+  return bestJ;
+}
+
 function silhouetteScore(Z, labels, k) {
   const n = Z.length;
   const clusters = Array.from({ length: k }, () => []);
@@ -308,10 +378,103 @@ function buildMatrix(filtered, cfg) {
       // first row: zeros
       catKeys.forEach(() => v.push(0));
     }
+    if (cfg.includeRoster) {
+      const roster = Array.isArray(s.roster) ? s.roster : [];
+      const count = (key) => roster.filter((p) => String(p.selectedPrimary) === key).length;
+      // Keep the roster feature set small + stable so it won't thrash with tiny samples.
+      const primaries = ["C", "1B", "2B", "3B", "SS", "OF", "Util", "SP", "RP", "P", "BN", "IL"];
+      primaries.forEach((k) => v.push(count(k)));
+      const bench = count("BN");
+      const il = count("IL");
+      const total = roster.length || 0;
+      v.push(total ? bench / total : 0); // bench fraction
+      v.push(total ? il / total : 0); // il fraction
+    }
     rows.push(v);
     labels.push(s.date);
   }
   return { X: rows, labels, catKeys };
+}
+
+function buildOutcomes(filtered, horizonDays) {
+  const yTotal = [];
+  const yFocus = [];
+  const yRankImprove = [];
+  const gaps = [];
+
+  for (let i = 0; i + horizonDays < filtered.length; i += 1) {
+    const a = filtered[i];
+    const b = filtered[i + horizonDays];
+    const aD = parseIsoDate(a.date);
+    const bD = parseIsoDate(b.date);
+    const gap = aD && bD ? Math.max(1, daysBetweenUtc(aD, bD)) : horizonDays;
+    gaps.push(gap);
+    yTotal.push((sumPoints(b) - sumPoints(a)) / gap);
+    yFocus.push((sumFocusPoints(b) - sumFocusPoints(a)) / gap);
+    const ra = toNumber(a.overallRank);
+    const rb = toNumber(b.overallRank);
+    yRankImprove.push(ra !== null && rb !== null ? (ra - rb) / gap : 0);
+  }
+
+  return { yTotal, yFocus, yRankImprove, gaps };
+}
+
+function evaluateKnnPredictive(Z, y, args) {
+  const n = y.length; // corresponds to indices [0..n-1] mapping to Z[0..n-1]
+  const results = [];
+
+  for (let neighbors = args.knnMin; neighbors <= args.knnMax; neighbors += 1) {
+    const preds = [];
+    const actual = [];
+    for (let t = args.minTrain; t < n; t += 1) {
+      const zt = Z[t];
+      const dists = [];
+      for (let i = 0; i < t; i += 1) {
+        dists.push({ i, d: dist2(zt, Z[i]) });
+      }
+      dists.sort((a, b) => a.d - b.d);
+      const picked = dists
+        .slice(0, Math.min(neighbors, dists.length))
+        .map((x) => y[x.i]);
+      const yHat = picked.length > 0 ? mean(picked) : mean(y.slice(0, t));
+      preds.push(yHat);
+      actual.push(y[t]);
+    }
+    results.push({
+      neighbors,
+      r2: r2(actual, preds),
+      mae: mae(actual, preds),
+      corr: corr(actual, preds),
+      n: actual.length,
+    });
+  }
+  results.sort((a, b) => b.r2 - a.r2);
+  return results[0] || null;
+}
+
+function evaluateKmeansPredictive(Z, y, k, args) {
+  const n = y.length;
+  const preds = [];
+  const actual = [];
+  for (let t = args.minTrain; t < n; t += 1) {
+    const trainZ = Z.slice(0, t);
+    const trainY = y.slice(0, t);
+    const km = kmeans(trainZ, k, { nInit: 15, maxIter: 60, seed: 4242 });
+    if (!km) continue;
+    const cluster = assignToCenters(Z[t], km.centers);
+    const clusterYs = [];
+    for (let i = 0; i < t; i += 1) if (km.labels[i] === cluster) clusterYs.push(trainY[i]);
+    const yHat = clusterYs.length > 0 ? mean(clusterYs) : mean(trainY);
+    preds.push(yHat);
+    actual.push(y[t]);
+  }
+  return {
+    k,
+    r2: r2(actual, preds),
+    mae: mae(actual, preds),
+    corr: corr(actual, preds),
+    n: actual.length,
+  };
 }
 
 function experiment(filtered, cfg, args) {
@@ -326,20 +489,21 @@ function experiment(filtered, cfg, args) {
   results.sort((a, b) => b.sil - a.sil);
   const best = results[0];
 
-  // post-hoc outcome separation: future delta total points per day
   const horizon = args.horizonDays;
-  const y = [];
+  const outcomes = buildOutcomes(filtered, horizon);
+
+  // post-hoc outcome separation: how much the clustering partitions future movement
   const g = [];
-  for (let i = 0; i + horizon < filtered.length; i += 1) {
-    const a = filtered[i];
-    const b = filtered[i + horizon];
-    const aD = parseIsoDate(a.date);
-    const bD = parseIsoDate(b.date);
-    const gap = aD && bD ? Math.max(1, daysBetweenUtc(aD, bD)) : horizon;
-    y.push((sumPoints(b) - sumPoints(a)) / gap);
-    g.push(best.labels[i]);
-  }
-  const separation = etaSquared(g, y);
+  for (let i = 0; i < outcomes.yTotal.length; i += 1) g.push(best.labels[i]);
+  const separation = etaSquared(g, outcomes.yTotal);
+
+  // predictive checks (rolling/expanding window, no leakage on test points)
+  // y arrays map to indices [0..n-horizon-1], so we slice Z accordingly.
+  const ZforY = Z.slice(0, outcomes.yTotal.length);
+  const knnTotal = evaluateKnnPredictive(ZforY, outcomes.yTotal, args);
+  const knnRank = evaluateKnnPredictive(ZforY, outcomes.yRankImprove, args);
+  const kmTotal = evaluateKmeansPredictive(ZforY, outcomes.yTotal, best.k, args);
+  const kmRank = evaluateKmeansPredictive(ZforY, outcomes.yRankImprove, best.k, args);
 
   // cluster summaries
   const clusterCounts = {};
@@ -356,6 +520,19 @@ function experiment(filtered, cfg, args) {
     bestK: best.k,
     silhouette: best.sil,
     separationEta2: separation,
+    predictive: {
+      horizonDays: horizon,
+      minTrain: args.minTrain,
+      outcomes: ["delta_total_points_per_day", "rank_improve_per_day"],
+      knn: {
+        totalPoints: knnTotal,
+        rankImprove: knnRank,
+      },
+      kmeans: {
+        totalPoints: kmTotal,
+        rankImprove: kmRank,
+      },
+    },
     assignments: labels.map((date, i) => ({ date, cluster: best.labels[i] })),
     clusters,
   };
@@ -378,27 +555,61 @@ const filtered = ordered.filter((s) => {
 });
 
 const configs = [
-  featureConfig("state_points", { includeMeta: true, includeCatPoints: true, includeActions: false, includeTrend: false }),
-  featureConfig("state_points_actions", { includeMeta: true, includeCatPoints: true, includeActions: true, includeTrend: false }),
-  featureConfig("state_points_trend", { includeMeta: true, includeCatPoints: true, includeActions: false, includeTrend: true }),
-  featureConfig("state_points_trend_actions", { includeMeta: true, includeCatPoints: true, includeActions: true, includeTrend: true }),
+  featureConfig("state_points", { includeMeta: true, includeCatPoints: true, includeActions: false, includeTrend: false, includeRoster: false }),
+  featureConfig("state_points_actions", { includeMeta: true, includeCatPoints: true, includeActions: true, includeTrend: false, includeRoster: false }),
+  featureConfig("state_points_trend", { includeMeta: true, includeCatPoints: true, includeActions: false, includeTrend: true, includeRoster: false }),
+  featureConfig("state_points_trend_actions", { includeMeta: true, includeCatPoints: true, includeActions: true, includeTrend: true, includeRoster: false }),
+  featureConfig("state_points_roster", { includeMeta: true, includeCatPoints: true, includeActions: false, includeTrend: false, includeRoster: true }),
+  featureConfig("state_points_trend_roster", { includeMeta: true, includeCatPoints: true, includeActions: false, includeTrend: true, includeRoster: true }),
+  featureConfig("state_points_trend_actions_roster", { includeMeta: true, includeCatPoints: true, includeActions: true, includeTrend: true, includeRoster: true }),
 ];
 
 const runs = configs.map((cfg) => experiment(filtered, cfg, args));
 const best = runs.slice().sort((a, b) => b.separationEta2 - a.separationEta2)[0];
+const bestPredictTotal = runs
+  .slice()
+  .filter((r) => r.predictive?.knn?.totalPoints?.r2 !== null)
+  .sort(
+    (a, b) =>
+      (b.predictive.knn.totalPoints.r2 || -Infinity) -
+      (a.predictive.knn.totalPoints.r2 || -Infinity)
+  )[0];
+const bestPredictRank = runs
+  .slice()
+  .filter((r) => r.predictive?.knn?.rankImprove?.r2 !== null)
+  .sort(
+    (a, b) =>
+      (b.predictive.knn.rankImprove.r2 || -Infinity) -
+      (a.predictive.knn.rankImprove.r2 || -Infinity)
+  )[0];
 
 const summary = {
   generatedAt: new Date().toISOString(),
   window: { from: filtered[0].date, to: filtered.at(-1).date, days: args.days, mode: args.mode },
   horizonDays: args.horizonDays,
+  sampleSizes: {
+    snapshots: filtered.length,
+    outcomeRows: Math.max(0, filtered.length - args.horizonDays),
+    minTrain: args.minTrain,
+  },
   selectionMetric: "eta_squared(delta_total_points_per_day ~ cluster)",
   best,
+  bestPredictive: {
+    note: "Unsupervised representations (k-means clusters, kNN similarity) evaluated with an expanding-window backtest.",
+    bestKnnByTotalPoints: bestPredictTotal
+      ? { config: bestPredictTotal.config, ...bestPredictTotal.predictive.knn.totalPoints }
+      : null,
+    bestKnnByRankImprove: bestPredictRank
+      ? { config: bestPredictRank.config, ...bestPredictRank.predictive.knn.rankImprove }
+      : null,
+  },
   runs: runs.map((r) => ({
     config: r.config,
     bestK: r.bestK,
     silhouette: r.silhouette,
     separationEta2: r.separationEta2,
     clusters: r.clusters,
+    predictive: r.predictive,
   })),
 };
 
@@ -410,6 +621,9 @@ if (args.write) {
   lines.push(``);
   lines.push(`Window: ${summary.window.from} -> ${summary.window.to} (${summary.window.days} days, mode=${summary.window.mode})`);
   lines.push(`Horizon: ${summary.horizonDays} day(s)`);
+  lines.push(
+    `Samples: snapshots=${summary.sampleSizes.snapshots}, outcomeRows=${summary.sampleSizes.outcomeRows}, minTrain=${summary.sampleSizes.minTrain}`
+  );
   lines.push(`Metric: ${summary.selectionMetric}`);
   lines.push(``);
   lines.push(`## Best Configuration`);
@@ -418,16 +632,37 @@ if (args.write) {
   lines.push(`- silhouette: ${best.silhouette.toFixed(3)}`);
   lines.push(`- eta^2: ${best.separationEta2.toFixed(3)}`);
   lines.push(``);
+  lines.push(`## Predictive (Unsupervised)`);
+  if (summary.bestPredictive.bestKnnByTotalPoints) {
+    const r = summary.bestPredictive.bestKnnByTotalPoints;
+    lines.push(
+      `- best kNN (total points): config=${r.config}, k=${r.neighbors}, r2=${r.r2.toFixed(3)}, mae=${r.mae.toFixed(3)}, corr=${r.corr.toFixed(3)}, n=${r.n}`
+    );
+  }
+  if (summary.bestPredictive.bestKnnByRankImprove) {
+    const r = summary.bestPredictive.bestKnnByRankImprove;
+    lines.push(
+      `- best kNN (rank improve): config=${r.config}, k=${r.neighbors}, r2=${r.r2.toFixed(3)}, mae=${r.mae.toFixed(3)}, corr=${r.corr.toFixed(3)}, n=${r.n}`
+    );
+  }
+  lines.push(``);
   lines.push(`## All Runs`);
   runs
     .slice()
     .sort((a, b) => b.separationEta2 - a.separationEta2)
     .forEach((r) => {
-      lines.push(`- ${r.config}: bestK=${r.bestK}, silhouette=${r.silhouette.toFixed(3)}, eta^2=${r.separationEta2.toFixed(3)}`);
+      const knnT = r.predictive?.knn?.totalPoints;
+      const knnR = r.predictive?.knn?.rankImprove;
+      const extra =
+        knnT && knnR
+          ? `, kNN(total r2=${knnT.r2.toFixed(2)} @k=${knnT.neighbors}), kNN(rank r2=${knnR.r2.toFixed(2)} @k=${knnR.neighbors})`
+          : "";
+      lines.push(
+        `- ${r.config}: bestK=${r.bestK}, silhouette=${r.silhouette.toFixed(3)}, eta^2=${r.separationEta2.toFixed(3)}${extra}`
+      );
     });
   lines.push(``);
   fs.writeFileSync(OUT_MD, lines.join("\n") + "\n");
 }
 
 console.log(`Best: ${best.config} (k=${best.bestK}, silhouette=${best.silhouette.toFixed(3)}, eta^2=${best.separationEta2.toFixed(3)})`);
-
