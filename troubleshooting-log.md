@@ -292,3 +292,13 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Generated a local HTML dashboard from `logs/snapshots.jsonl`.
     - Problem: Needed a graphical way to track regression + effectiveness trends over time.
     - Solution: Added `scripts/dashboard.mjs` to build `logs/dashboard.html`, and `recommend` now refreshes it automatically.
+
+55. **Make dashboard easy to open**
+    - Step: Add a CLI command to open the dashboard from Terminal.
+    - Problem: `logs/dashboard.html` was useful but inconvenient to find/click repeatedly.
+    - Solution: Added `node cli.js dashboard --open-dashboard` to generate and open the dashboard directly.
+
+56. **Host dashboard on GitHub**
+    - Step: Publish dashboard output to a GitHub Pages-friendly path.
+    - Problem: `logs/dashboard.html` is ignored by git and can’t be shared as a URL.
+    - Solution: Added `node cli.js dashboard --publish` to generate `docs/index.html` so GitHub Pages can serve it.

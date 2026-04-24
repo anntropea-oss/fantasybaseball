@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import readline from "readline";
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import { loadTokens, saveTokens, yahooRequest, refreshTokens, isTokenExpired } from "./yahoo-api.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -112,15 +112,59 @@ function shouldGenerateDashboard() {
   return true;
 }
 
-function generateDashboard() {
+function generateDashboardTo(outPath = null) {
   if (!shouldGenerateDashboard()) return;
   try {
     const scriptPath = path.join(__dirname, "scripts", "dashboard.mjs");
-    execFileSync(process.execPath, [scriptPath, "--days", "30", "--daily"], {
-      stdio: "ignore",
-    });
+    const args = [scriptPath, "--days", "30", "--daily"];
+    if (outPath) args.push("--out", outPath);
+    execFileSync(process.execPath, args, { stdio: "ignore" });
   } catch {
     // Best-effort: dashboard should never break recommend.
+  }
+}
+
+function shouldOpenDashboard() {
+  if (process.argv.includes("--open-dashboard")) return true;
+  if (process.argv.includes("--no-open-dashboard")) return false;
+  return process.env.FANTASY_DASHBOARD_OPEN === "1";
+}
+
+function openDashboardFile(filePath) {
+  try {
+    // macOS
+    const mac = spawnSync("open", [filePath], { stdio: "ignore" });
+    if (mac.status === 0) return true;
+  } catch {
+    // ignore
+  }
+  try {
+    // Linux
+    const linux = spawnSync("xdg-open", [filePath], { stdio: "ignore" });
+    if (linux.status === 0) return true;
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+async function dashboard() {
+  const publish = process.argv.includes("--publish");
+  const filePath = publish
+    ? path.join(__dirname, "docs", "index.html")
+    : path.join(__dirname, "logs", "dashboard.html");
+
+  generateDashboardTo(filePath);
+  console.log(`Dashboard: ${filePath}`);
+  if (shouldOpenDashboard()) {
+    const ok = openDashboardFile(filePath);
+    if (!ok) {
+      console.log("Could not auto-open dashboard. Try:");
+      console.log(`open ${filePath}`);
+    }
+  } else {
+    console.log("Open it with:");
+    console.log(`open ${filePath}`);
   }
 }
 
@@ -2998,7 +3042,7 @@ async function recommend() {
     currentSnapshot: snapshot,
   });
   saveLearning(updatedLearning);
-  generateDashboard();
+  generateDashboardTo(null);
 
   if (shouldPromptForLog()) {
     const shouldLog = await promptYesNo("Log actions you actually made? (y/n): ");
@@ -3060,11 +3104,13 @@ async function main() {
       await logActions();
     } else if (command === "discover") {
       await discover();
+    } else if (command === "dashboard") {
+      await dashboard();
     } else if (command === "recommend") {
       await recommend();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|log|recommend> [--top N] [--position C] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|log|recommend> [--top N] [--position C] [--verbose]"
       );
     }
   } catch (error) {

@@ -25,6 +25,18 @@ node cli.js discover
 node cli.js recommend
 ```
 
+6. Open the dashboard.
+
+```bash
+node cli.js dashboard --open-dashboard
+```
+
+7. Publish the dashboard to GitHub Pages output (writes `docs/index.html`).
+
+```bash
+node cli.js dashboard --publish
+```
+
 ## Notes
 
 - The CLI stores OAuth tokens at `.tokens.json`.

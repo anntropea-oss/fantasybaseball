@@ -1,0 +1,166 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fantasy Baseball Dashboard</title>
+  <style>
+    :root { --bg: #f8fafc; --ink: #0f172a; --muted: #475569; --card: #ffffff; --border: #e2e8f0; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; background: var(--bg); color: var(--ink); }
+    .wrap { max-width: 1080px; margin: 20px auto 48px; padding: 0 16px; }
+    h1 { font-size: 20px; margin: 0 0 6px; }
+    .meta { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+    .row { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 940px) { .row { grid-template-columns: 1fr 1fr; } }
+    code { background: #f1f5f9; padding: 2px 6px; border-radius: 6px; }
+    .tiny { font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Fantasy Baseball Tracker</h1>
+    <div class="meta">Built from <code>logs/snapshots.jsonl</code> • Window: 2026-04-01 → 2026-04-24 • Mode: daily • Updated: 2026-04-24T14:04:26.361Z</div>
+
+    <div class="row">
+      <div class="card">
+        <svg viewBox="0 0 980 220" width="100%" height="220" role="img" aria-label="Total Roto Points (Sum)">
+  <rect x="0" y="0" width="980" height="220" fill="#ffffff" />
+  <text x="48" y="18" font-size="14" fill="#111827" font-weight="600">Total Roto Points (Sum)</text>
+  <g transform="translate(48,16)"><rect width="10" height="10" fill="#111827" /><text x="16" y="10" font-size="12" fill="#1f2937">Total Points</text></g>
+  <g><line x1="48" x2="962" y1="28.0" y2="28.0" stroke="#e5e7eb" /><text x="40" y="32.0" text-anchor="end" font-size="11" fill="#6b7280">46.24</text></g>
+<g><line x1="48" x2="962" y1="67.5" y2="67.5" stroke="#e5e7eb" /><text x="40" y="71.5" text-anchor="end" font-size="11" fill="#6b7280">41.75</text></g>
+<g><line x1="48" x2="962" y1="107.0" y2="107.0" stroke="#e5e7eb" /><text x="40" y="111.0" text-anchor="end" font-size="11" fill="#6b7280">37.25</text></g>
+<g><line x1="48" x2="962" y1="146.5" y2="146.5" stroke="#e5e7eb" /><text x="40" y="150.5" text-anchor="end" font-size="11" fill="#6b7280">32.76</text></g>
+<g><line x1="48" x2="962" y1="186.0" y2="186.0" stroke="#e5e7eb" /><text x="40" y="190.0" text-anchor="end" font-size="11" fill="#6b7280">28.26</text></g>
+  <line x1="48" x2="962" y1="186" y2="186" stroke="#9ca3af" />
+  <g><line x1="48.0" x2="48.0" y1="186" y2="190" stroke="#9ca3af" /><text x="48.0" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-01</text></g>
+<g><line x1="144.2" x2="144.2" y1="186" y2="190" stroke="#9ca3af" /><text x="144.2" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-04</text></g>
+<g><line x1="240.4" x2="240.4" y1="186" y2="190" stroke="#9ca3af" /><text x="240.4" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-06</text></g>
+<g><line x1="336.6" x2="336.6" y1="186" y2="190" stroke="#9ca3af" /><text x="336.6" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-08</text></g>
+<g><line x1="432.8" x2="432.8" y1="186" y2="190" stroke="#9ca3af" /><text x="432.8" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-11</text></g>
+<g><line x1="529.1" x2="529.1" y1="186" y2="190" stroke="#9ca3af" /><text x="529.1" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-13</text></g>
+<g><line x1="625.3" x2="625.3" y1="186" y2="190" stroke="#9ca3af" /><text x="625.3" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-15</text></g>
+<g><line x1="721.5" x2="721.5" y1="186" y2="190" stroke="#9ca3af" /><text x="721.5" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-17</text></g>
+<g><line x1="817.7" x2="817.7" y1="186" y2="190" stroke="#9ca3af" /><text x="817.7" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-21</text></g>
+<g><line x1="913.9" x2="913.9" y1="186" y2="190" stroke="#9ca3af" /><text x="913.9" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-23</text></g>
+<g><line x1="962.0" x2="962.0" y1="186" y2="190" stroke="#9ca3af" /><text x="962.0" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-24</text></g>
+  <path d="M 48.0,148.7 L 96.1,140.0 L 144.2,60.9 L 192.3,100.4 L 240.4,100.4 L 288.5,153.1 L 336.6,175.1 L 384.7,144.3 L 432.8,153.1 L 480.9,175.1 L 529.1,161.9 L 577.2,118.0 L 625.3,148.7 L 673.4,56.5 L 721.5,38.9 L 769.6,56.5 L 817.7,118.0 L 865.8,91.6 L 913.9,87.2 L 962.0,78.4" fill="none" stroke="#111827" stroke-width="2.2" />
+</svg>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 980 220" width="100%" height="220" role="img" aria-label="Overall Rank (Lower Is Better)">
+  <rect x="0" y="0" width="980" height="220" fill="#ffffff" />
+  <text x="48" y="18" font-size="14" fill="#111827" font-weight="600">Overall Rank (Lower Is Better)</text>
+  <g transform="translate(48,16)"><rect width="10" height="10" fill="#16a34a" /><text x="16" y="10" font-size="12" fill="#1f2937">Rank</text></g>
+  <g><line x1="48" x2="962" y1="28.0" y2="28.0" stroke="#e5e7eb" /><text x="40" y="32.0" text-anchor="end" font-size="11" fill="#6b7280">11.92</text></g>
+<g><line x1="48" x2="962" y1="67.5" y2="67.5" stroke="#e5e7eb" /><text x="40" y="71.5" text-anchor="end" font-size="11" fill="#6b7280">12.21</text></g>
+<g><line x1="48" x2="962" y1="107.0" y2="107.0" stroke="#e5e7eb" /><text x="40" y="111.0" text-anchor="end" font-size="11" fill="#6b7280">12.50</text></g>
+<g><line x1="48" x2="962" y1="146.5" y2="146.5" stroke="#e5e7eb" /><text x="40" y="150.5" text-anchor="end" font-size="11" fill="#6b7280">12.79</text></g>
+<g><line x1="48" x2="962" y1="186.0" y2="186.0" stroke="#e5e7eb" /><text x="40" y="190.0" text-anchor="end" font-size="11" fill="#6b7280">13.08</text></g>
+  <line x1="48" x2="962" y1="186" y2="186" stroke="#9ca3af" />
+  <g><line x1="48.0" x2="48.0" y1="186" y2="190" stroke="#9ca3af" /><text x="48.0" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-01</text></g>
+<g><line x1="144.2" x2="144.2" y1="186" y2="190" stroke="#9ca3af" /><text x="144.2" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-04</text></g>
+<g><line x1="240.4" x2="240.4" y1="186" y2="190" stroke="#9ca3af" /><text x="240.4" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-06</text></g>
+<g><line x1="336.6" x2="336.6" y1="186" y2="190" stroke="#9ca3af" /><text x="336.6" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-08</text></g>
+<g><line x1="432.8" x2="432.8" y1="186" y2="190" stroke="#9ca3af" /><text x="432.8" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-11</text></g>
+<g><line x1="529.1" x2="529.1" y1="186" y2="190" stroke="#9ca3af" /><text x="529.1" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-13</text></g>
+<g><line x1="625.3" x2="625.3" y1="186" y2="190" stroke="#9ca3af" /><text x="625.3" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-15</text></g>
+<g><line x1="721.5" x2="721.5" y1="186" y2="190" stroke="#9ca3af" /><text x="721.5" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-17</text></g>
+<g><line x1="817.7" x2="817.7" y1="186" y2="190" stroke="#9ca3af" /><text x="817.7" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-21</text></g>
+<g><line x1="913.9" x2="913.9" y1="186" y2="190" stroke="#9ca3af" /><text x="913.9" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-23</text></g>
+<g><line x1="962.0" x2="962.0" y1="186" y2="190" stroke="#9ca3af" /><text x="962.0" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-24</text></g>
+  <path d="M 48.0,175.1 L 96.1,175.1 L 144.2,38.9 L 192.3,175.1 L 240.4,175.1 L 288.5,175.1 L 336.6,175.1 L 384.7,175.1 L 432.8,175.1 L 480.9,175.1 L 529.1,175.1 L 577.2,175.1 L 625.3,175.1 L 673.4,38.9 L 721.5,38.9 L 769.6,38.9 L 817.7,38.9 L 865.8,38.9 L 913.9,38.9 L 962.0,38.9" fill="none" stroke="#16a34a" stroke-width="2.2" />
+</svg>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <svg viewBox="0 0 980 220" width="100%" height="220" role="img" aria-label="Focus Points (Targets + Best Value)">
+  <rect x="0" y="0" width="980" height="220" fill="#ffffff" />
+  <text x="48" y="18" font-size="14" fill="#111827" font-weight="600">Focus Points (Targets + Best Value)</text>
+  <g transform="translate(48,16)"><rect width="10" height="10" fill="#7c3aed" /><text x="16" y="10" font-size="12" fill="#1f2937">Focus Points</text></g>
+  <g><line x1="48" x2="962" y1="28.0" y2="28.0" stroke="#e5e7eb" /><text x="40" y="32.0" text-anchor="end" font-size="11" fill="#6b7280">24.06</text></g>
+<g><line x1="48" x2="962" y1="67.5" y2="67.5" stroke="#e5e7eb" /><text x="40" y="71.5" text-anchor="end" font-size="11" fill="#6b7280">18.40</text></g>
+<g><line x1="48" x2="962" y1="107.0" y2="107.0" stroke="#e5e7eb" /><text x="40" y="111.0" text-anchor="end" font-size="11" fill="#6b7280">12.75</text></g>
+<g><line x1="48" x2="962" y1="146.5" y2="146.5" stroke="#e5e7eb" /><text x="40" y="150.5" text-anchor="end" font-size="11" fill="#6b7280">7.09</text></g>
+<g><line x1="48" x2="962" y1="186.0" y2="186.0" stroke="#e5e7eb" /><text x="40" y="190.0" text-anchor="end" font-size="11" fill="#6b7280">1.44</text></g>
+  <line x1="48" x2="962" y1="186" y2="186" stroke="#9ca3af" />
+  <g><line x1="48.0" x2="48.0" y1="186" y2="190" stroke="#9ca3af" /><text x="48.0" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-01</text></g>
+<g><line x1="144.2" x2="144.2" y1="186" y2="190" stroke="#9ca3af" /><text x="144.2" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-04</text></g>
+<g><line x1="240.4" x2="240.4" y1="186" y2="190" stroke="#9ca3af" /><text x="240.4" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-06</text></g>
+<g><line x1="336.6" x2="336.6" y1="186" y2="190" stroke="#9ca3af" /><text x="336.6" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-08</text></g>
+<g><line x1="432.8" x2="432.8" y1="186" y2="190" stroke="#9ca3af" /><text x="432.8" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-11</text></g>
+<g><line x1="529.1" x2="529.1" y1="186" y2="190" stroke="#9ca3af" /><text x="529.1" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-13</text></g>
+<g><line x1="625.3" x2="625.3" y1="186" y2="190" stroke="#9ca3af" /><text x="625.3" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-15</text></g>
+<g><line x1="721.5" x2="721.5" y1="186" y2="190" stroke="#9ca3af" /><text x="721.5" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-17</text></g>
+<g><line x1="817.7" x2="817.7" y1="186" y2="190" stroke="#9ca3af" /><text x="817.7" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-21</text></g>
+<g><line x1="913.9" x2="913.9" y1="186" y2="190" stroke="#9ca3af" /><text x="913.9" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-23</text></g>
+<g><line x1="962.0" x2="962.0" y1="186" y2="190" stroke="#9ca3af" /><text x="962.0" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-24</text></g>
+  <path d="M 48.0,168.1 L 96.1,175.1 L 144.2,161.1 L 192.3,161.1 L 240.4,161.1 L 288.5,175.1 L 336.6,175.1 L 384.7,164.6 L 432.8,171.6 L 480.9,175.1 L 529.1,168.1 L 577.2,164.6 L 625.3,164.6 L 673.4,143.7 L 721.5,136.7 L 769.6,161.1 L 817.7,161.1 L 865.8,115.7 L 913.9,38.9 L 962.0,73.8" fill="none" stroke="#7c3aed" stroke-width="2.2" />
+</svg>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 980 220" width="100%" height="220" role="img" aria-label="Saves (SV)">
+  <rect x="0" y="0" width="980" height="220" fill="#ffffff" />
+  <text x="48" y="18" font-size="14" fill="#111827" font-weight="600">Saves (SV)</text>
+  <g transform="translate(48,16)"><rect width="10" height="10" fill="#f59e0b" /><text x="16" y="10" font-size="12" fill="#1f2937">SV</text></g>
+  <g><line x1="48" x2="962" y1="28.0" y2="28.0" stroke="#e5e7eb" /><text x="40" y="32.0" text-anchor="end" font-size="11" fill="#6b7280">1.00</text></g>
+<g><line x1="48" x2="962" y1="67.5" y2="67.5" stroke="#e5e7eb" /><text x="40" y="71.5" text-anchor="end" font-size="11" fill="#6b7280">0.50</text></g>
+<g><line x1="48" x2="962" y1="107.0" y2="107.0" stroke="#e5e7eb" /><text x="40" y="111.0" text-anchor="end" font-size="11" fill="#6b7280">0.00</text></g>
+<g><line x1="48" x2="962" y1="146.5" y2="146.5" stroke="#e5e7eb" /><text x="40" y="150.5" text-anchor="end" font-size="11" fill="#6b7280">-0.50</text></g>
+<g><line x1="48" x2="962" y1="186.0" y2="186.0" stroke="#e5e7eb" /><text x="40" y="190.0" text-anchor="end" font-size="11" fill="#6b7280">-1.00</text></g>
+  <line x1="48" x2="962" y1="186" y2="186" stroke="#9ca3af" />
+  <g><line x1="48.0" x2="48.0" y1="186" y2="190" stroke="#9ca3af" /><text x="48.0" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-01</text></g>
+<g><line x1="144.2" x2="144.2" y1="186" y2="190" stroke="#9ca3af" /><text x="144.2" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-04</text></g>
+<g><line x1="240.4" x2="240.4" y1="186" y2="190" stroke="#9ca3af" /><text x="240.4" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-06</text></g>
+<g><line x1="336.6" x2="336.6" y1="186" y2="190" stroke="#9ca3af" /><text x="336.6" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-08</text></g>
+<g><line x1="432.8" x2="432.8" y1="186" y2="190" stroke="#9ca3af" /><text x="432.8" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-11</text></g>
+<g><line x1="529.1" x2="529.1" y1="186" y2="190" stroke="#9ca3af" /><text x="529.1" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-13</text></g>
+<g><line x1="625.3" x2="625.3" y1="186" y2="190" stroke="#9ca3af" /><text x="625.3" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-15</text></g>
+<g><line x1="721.5" x2="721.5" y1="186" y2="190" stroke="#9ca3af" /><text x="721.5" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-17</text></g>
+<g><line x1="817.7" x2="817.7" y1="186" y2="190" stroke="#9ca3af" /><text x="817.7" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-21</text></g>
+<g><line x1="913.9" x2="913.9" y1="186" y2="190" stroke="#9ca3af" /><text x="913.9" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-23</text></g>
+<g><line x1="962.0" x2="962.0" y1="186" y2="190" stroke="#9ca3af" /><text x="962.0" y="210" text-anchor="middle" font-size="11" fill="#6b7280">04-24</text></g>
+  <path d="M 48.0,107.0 L 96.1,107.0 L 144.2,107.0 L 192.3,107.0 L 240.4,107.0 L 288.5,107.0 L 336.6,107.0 L 384.7,107.0 L 432.8,107.0 L 480.9,107.0 L 529.1,107.0 L 577.2,107.0 L 625.3,107.0 L 673.4,107.0 L 721.5,107.0 L 769.6,107.0 L 817.7,107.0 L 865.8,107.0 L 913.9,107.0 L 962.0,107.0" fill="none" stroke="#f59e0b" stroke-width="2.2" />
+</svg>
+      </div>
+    </div>
+
+    <div class="card">
+      <svg viewBox="0 0 980 260" width="100%" height="260" role="img" aria-label="Regression View: Used Starts vs Delta Total Points/Day">
+  <rect x="0" y="0" width="980" height="260" fill="#ffffff" />
+  <text x="52" y="18" font-size="14" fill="#111827" font-weight="600">Regression View: Used Starts vs Delta Total Points/Day</text>
+  <text x="962" y="18" font-size="12" fill="#6b7280" text-anchor="end">slope -0.71, r2 0.05</text>
+  <line x1="52" x2="962" y1="220" y2="220" stroke="#9ca3af" />
+  <line x1="52" x2="52" y1="28" y2="220" stroke="#9ca3af" />
+  <line x1="52.0" y1="125.4" x2="962.0" y2="150.2" stroke="#ef4444" stroke-width="2" opacity="0.9" />
+  <circle cx="114.8" cy="141.6" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="114.8" cy="56.3" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="114.8" cy="191.7" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="899.2" cy="146.6" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="637.7" cy="206.8" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="114.8" cy="171.6" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="899.2" cy="111.5" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="637.7" cy="151.6" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="899.2" cy="171.6" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="637.7" cy="131.5" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="899.2" cy="96.4" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="637.7" cy="181.7" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="114.8" cy="41.2" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="114.8" cy="126.5" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="899.2" cy="166.6" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="899.2" cy="170.0" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="899.2" cy="116.5" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="899.2" cy="141.6" r="4" fill="#2563eb" opacity="0.85" />
+<circle cx="637.7" cy="136.5" r="4" fill="#2563eb" opacity="0.85" />
+  <text x="507.0" y="250" font-size="12" fill="#374151" text-anchor="middle">Recommended starts used (inferred)</text>
+  <text x="14" y="124.0" font-size="12" fill="#374151" text-anchor="middle" transform="rotate(-90 14 124.0)">Delta total roto points per day</text>
+</svg>
+      <div class="tiny">Note: “used starts” is inferred from roster position changes between snapshots; if you don’t change BN/active slots every day, this understates adherence.</div>
+    </div>
+  </div>
+</body>
+</html>
