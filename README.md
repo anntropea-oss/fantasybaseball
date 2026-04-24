@@ -25,6 +25,12 @@ node cli.js discover
 node cli.js recommend
 ```
 
+Optional: log a snapshot without computing recommendations (useful for daily tracking even on “busy” days).
+
+```bash
+node cli.js snapshot
+```
+
 6. Open the dashboard.
 
 ```bash
@@ -41,6 +47,7 @@ node cli.js dashboard --publish
 
 - The CLI stores OAuth tokens at `.tokens.json`.
 - If you play multiple leagues, `discover` will list them and pick the first. You can edit `leagueKey` and `teamKey` in `config.json` after discovery.
+- For recurring runs, you can call `scripts/run-daily.sh` from cron/launchd.
 
 ## Branch Helpers
 

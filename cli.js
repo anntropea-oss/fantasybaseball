@@ -31,6 +31,7 @@ const HISTORY_SEASONS = 5;
 const HITTER_STABILIZER_AB = 200;
 const PITCHER_STABILIZER_IP = 30;
 const MAX_HISTORY_KEYS = 80;
+const MAX_ARCHETYPE_KEYS = 120;
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -704,24 +705,28 @@ async function fetchPlayerStatsByKeys({ accessToken, playerKeys, statTypeOverrid
   if (!playerKeys || playerKeys.length === 0) {
     return { statsByKey: new Map(), statType: null, hasStats: false };
   }
-  const keyParam = encodeURIComponent(playerKeys.join(","));
   for (const statType of statTypes) {
     try {
-      const data = await yahooRequest({
-        url: `${FANTASY_API_BASE}/players;player_keys=${keyParam}/stats;type=${statType}?format=json`,
-        accessToken,
-      });
-      writeDebugJson(`player-stats-${statType}`, data);
       const statsByKey = new Map();
-      const playerNodes = findAllValuesByKey(data, "player");
-      playerNodes.forEach((player) => {
-        const key = extractPlayerKey(player);
-        if (!key) return;
-        const stats = extractPlayerStats(player);
-        if (stats.size > 0) {
-          statsByKey.set(key, stats);
-        }
-      });
+      const chunks = chunkArray(playerKeys, 25);
+      for (let idx = 0; idx < chunks.length; idx += 1) {
+        const chunk = chunks[idx];
+        const keyParam = encodeURIComponent(chunk.join(","));
+        const data = await yahooRequest({
+          url: `${FANTASY_API_BASE}/players;player_keys=${keyParam}/stats;type=${statType}?format=json`,
+          accessToken,
+        });
+        writeDebugJson(`player-stats-${statType}-${idx + 1}`, data);
+        const playerNodes = findAllValuesByKey(data, "player");
+        playerNodes.forEach((player) => {
+          const key = extractPlayerKey(player);
+          if (!key) return;
+          const stats = extractPlayerStats(player);
+          if (stats.size > 0) {
+            statsByKey.set(key, stats);
+          }
+        });
+      }
       return { statsByKey, statType, hasStats: statsByKey.size > 0 };
     } catch (error) {
       // try next stat type
@@ -802,6 +807,8 @@ function buildSnapshot({
   targetKeys,
   bestValueTargets,
   focusKeys,
+  pointsToNextTeam,
+  categoryNextGaps,
   actionSuggestions,
   rosterState,
 }) {
@@ -829,6 +836,8 @@ function buildSnapshot({
     gpCap,
     ipValue,
     ipCap,
+    pointsToNextTeam: pointsToNextTeam || null,
+    categoryNextGaps: categoryNextGaps || null,
     targets: Array.isArray(targetKeys) ? targetKeys : [],
     focusTargets: Array.isArray(focusKeys) ? focusKeys : [],
     bestValueTargets,
@@ -1335,6 +1344,264 @@ function rankHittersByStats(candidates, statIdByKey, targetKeys) {
     .sort((a, b) => b.score - a.score);
 }
 
+function zscoreMatrix(X) {
+  const n = X.length;
+  const p = X[0]?.length || 0;
+  const means = Array.from({ length: p }, () => 0);
+  const stds = Array.from({ length: p }, () => 1);
+  for (let j = 0; j < p; j += 1) {
+    let sum = 0;
+    for (let i = 0; i < n; i += 1) sum += X[i][j];
+    means[j] = sum / n;
+  }
+  for (let j = 0; j < p; j += 1) {
+    let ss = 0;
+    for (let i = 0; i < n; i += 1) ss += Math.pow(X[i][j] - means[j], 2);
+    stds[j] = Math.sqrt(ss / n) || 1;
+  }
+  const Z = X.map((row) => row.map((v, j) => (v - means[j]) / stds[j]));
+  return { Z, means, stds };
+}
+
+function dist2Vec(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i += 1) s += Math.pow(a[i] - b[i], 2);
+  return s;
+}
+
+function mulberry32(seed) {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6d2b79f5;
+    let x = t;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function kmeansSimple(Z, k, { nInit = 15, maxIter = 60, seed = 42 } = {}) {
+  const n = Z.length;
+  const p = Z[0].length;
+  const rngBase = mulberry32(seed);
+  let best = null;
+
+  for (let init = 0; init < nInit; init += 1) {
+    const rng = mulberry32(Math.floor(rngBase() * 1e9));
+    const centers = [];
+    const used = new Set();
+    while (centers.length < k) {
+      const idx = Math.floor(rng() * n);
+      if (used.has(idx)) continue;
+      used.add(idx);
+      centers.push(Z[idx].slice());
+    }
+
+    let labels = Array.from({ length: n }, () => 0);
+    for (let iter = 0; iter < maxIter; iter += 1) {
+      let changed = 0;
+      for (let i = 0; i < n; i += 1) {
+        let bestJ = 0;
+        let bestD = Infinity;
+        for (let j = 0; j < k; j += 1) {
+          const d = dist2Vec(Z[i], centers[j]);
+          if (d < bestD) {
+            bestD = d;
+            bestJ = j;
+          }
+        }
+        if (labels[i] !== bestJ) {
+          labels[i] = bestJ;
+          changed += 1;
+        }
+      }
+
+      const sums = Array.from({ length: k }, () => Array.from({ length: p }, () => 0));
+      const counts = Array.from({ length: k }, () => 0);
+      for (let i = 0; i < n; i += 1) {
+        const j = labels[i];
+        counts[j] += 1;
+        for (let d = 0; d < p; d += 1) sums[j][d] += Z[i][d];
+      }
+      for (let j = 0; j < k; j += 1) {
+        if (counts[j] === 0) continue;
+        for (let d = 0; d < p; d += 1) centers[j][d] = sums[j][d] / counts[j];
+      }
+      if (changed === 0) break;
+    }
+
+    let inertia = 0;
+    for (let i = 0; i < n; i += 1) inertia += dist2Vec(Z[i], centers[labels[i]]);
+    if (!best || inertia < best.inertia) best = { labels, centers, inertia };
+  }
+
+  return best;
+}
+
+function buildPlayerFeatureVector({
+  playerKey,
+  isPitcher,
+  statKeys,
+  statIdByKey,
+  seasonStats,
+  lastMonthStats,
+  abStatId,
+  ipStatId,
+}) {
+  if (!playerKey) return null;
+  const sampleStatId = isPitcher ? ipStatId : abStatId;
+  const seasonSample = sampleStatId ? toNumber(seasonStats?.get(sampleStatId)) : null;
+  const lastSample = sampleStatId ? toNumber(lastMonthStats?.get(sampleStatId)) : null;
+
+  const vec = [];
+  statKeys.forEach((key) => {
+    const statId = statIdByKey.get(key);
+    const raw = statId ? toNumber(seasonStats?.get(statId)) : null;
+    if (isRateStat(key)) {
+      vec.push(raw ?? 0);
+    } else {
+      const denom = seasonSample !== null && seasonSample > 0 ? seasonSample : null;
+      vec.push(raw !== null && denom ? raw / denom : 0);
+    }
+  });
+  statKeys.forEach((key) => {
+    const statId = statIdByKey.get(key);
+    const raw = statId ? toNumber(lastMonthStats?.get(statId)) : null;
+    if (isRateStat(key)) {
+      vec.push(raw ?? 0);
+    } else {
+      const denom = lastSample !== null && lastSample > 0 ? lastSample : null;
+      vec.push(raw !== null && denom ? raw / denom : 0);
+    }
+  });
+
+  const stabilizer = isPitcher ? PITCHER_STABILIZER_IP : HITTER_STABILIZER_AB;
+  const s = seasonSample !== null && seasonSample > 0 ? seasonSample : 0;
+  const lm = lastSample !== null && lastSample > 0 ? lastSample : 0;
+  vec.push(stabilizer > 0 ? s / (s + stabilizer) : 0);
+  vec.push(stabilizer > 0 ? lm / (lm + stabilizer) : 0);
+
+  return vec;
+}
+
+function labelArchetype({ isPitcher, topKeys }) {
+  const keys = topKeys || [];
+  if (isPitcher) {
+    if (keys.includes("SV")) return "Closer";
+    if (keys.includes("K") && (keys.includes("ERA") || keys.includes("WHIP"))) return "K/Ratio";
+    if (keys.includes("K")) return "Strikeouts";
+    if (keys.includes("W")) return "Wins";
+    return "Arms";
+  }
+  if (keys.includes("SB")) return "Speed";
+  if (keys.includes("HR") || keys.includes("RBI")) return "Power";
+  if (keys.includes("AVG")) return "Average";
+  if (keys.includes("R")) return "Runs";
+  return "Balanced";
+}
+
+function buildArchetypes({
+  poolPlayers,
+  isPitcher,
+  statKeys,
+  statIdByKey,
+  seasonStatsByKey,
+  lastMonthStatsByKey,
+  abStatId,
+  ipStatId,
+  focusKeys,
+}) {
+  const rows = [];
+  const keys = [];
+  for (const pk of poolPlayers) {
+    const seasonStats = seasonStatsByKey.get(pk) || null;
+    if (!seasonStats) continue;
+    const lastMonthStats = lastMonthStatsByKey.get(pk) || new Map();
+    const v = buildPlayerFeatureVector({
+      playerKey: pk,
+      isPitcher,
+      statKeys,
+      statIdByKey,
+      seasonStats,
+      lastMonthStats,
+      abStatId,
+      ipStatId,
+    });
+    if (!v) continue;
+    rows.push(v);
+    keys.push(pk);
+  }
+
+  if (rows.length < 6) return new Map();
+  const { Z } = zscoreMatrix(rows);
+  const n = Z.length;
+  const k = Math.max(2, Math.min(4, Math.round(Math.sqrt(n))));
+  const km = kmeansSimple(Z, Math.min(k, n), { seed: 1337 });
+  if (!km) return new Map();
+
+  const p = Z[0].length;
+  const centroids = Array.from({ length: km.centers.length }, () =>
+    Array.from({ length: p }, () => 0)
+  );
+  const counts = Array.from({ length: km.centers.length }, () => 0);
+  for (let i = 0; i < n; i += 1) {
+    const c = km.labels[i];
+    counts[c] += 1;
+    for (let j = 0; j < p; j += 1) centroids[c][j] += Z[i][j];
+  }
+  for (let c = 0; c < centroids.length; c += 1) {
+    const denom = counts[c] || 1;
+    for (let j = 0; j < p; j += 1) centroids[c][j] /= denom;
+  }
+
+  const featureIndex = new Map();
+  statKeys.forEach((key, idx) => {
+    featureIndex.set(key, { season: idx, lastMonth: idx + statKeys.length });
+  });
+  const goodnessByCluster = new Map();
+  for (let c = 0; c < centroids.length; c += 1) {
+    const centroid = centroids[c];
+    const goodness = {};
+    statKeys.forEach((key) => {
+      const idxs = featureIndex.get(key);
+      const raw = ((centroid[idxs.season] ?? 0) + (centroid[idxs.lastMonth] ?? 0)) / 2;
+      // For lower-better stats, a more negative z is better.
+      goodness[key] = isLowerBetter(key, key) ? -raw : raw;
+    });
+    goodnessByCluster.set(c, goodness);
+  }
+
+  const focusSet = new Set(
+    (focusKeys || []).filter((k2) => statKeys.includes(k2))
+  );
+  const out = new Map();
+
+  for (let i = 0; i < keys.length; i += 1) {
+    const pk = keys[i];
+    const cluster = km.labels[i];
+    const goodness = goodnessByCluster.get(cluster) || {};
+    const sortedKeys = [...statKeys]
+      .map((k2) => ({ key: k2, score: goodness[k2] ?? 0 }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 2)
+      .map((x) => x.key);
+    const label = labelArchetype({ isPitcher, topKeys: sortedKeys });
+    let fitScore = 0;
+    if (focusSet.size > 0) {
+      focusSet.forEach((k2) => {
+        fitScore += goodness[k2] ?? 0;
+      });
+    } else {
+      sortedKeys.forEach((k2) => {
+        fitScore += goodness[k2] ?? 0;
+      });
+    }
+    out.set(pk, { cluster, label, fitScore });
+  }
+
+  return out;
+}
+
 function buildEfficiencyScores(resolvedCategories, teamMetrics, myTeamMetrics, teamKey) {
   const scores = new Map();
   if (!teamMetrics || teamMetrics.length === 0 || !myTeamMetrics) return scores;
@@ -1439,6 +1706,84 @@ function buildPointGapScores(resolvedCategories, teamMetrics, myTeamMetrics, tea
     scores.set(entry.key, normalized);
   });
   return scores;
+}
+
+function buildCategoryNextGaps(resolvedCategories, teamMetrics, myTeamMetrics, teamKey) {
+  const gaps = {};
+  if (!teamMetrics || teamMetrics.length === 0 || !myTeamMetrics) return gaps;
+
+  resolvedCategories.forEach((cat) => {
+    if (!cat.statId) return;
+    const isLower = isLowerBetter(cat.key, cat.name);
+    const myStat = myTeamMetrics.statsById.get(cat.statId);
+    const myValue = toNumber(extractStatValue(myStat));
+    const myPoints = toNumber(
+      extractStatValue(myTeamMetrics.pointsById.get(cat.statId))
+    );
+    if (myValue === null) return;
+
+    const entries = teamMetrics
+      .map((team) => {
+        const stat = team.statsById.get(cat.statId);
+        const value = toNumber(extractStatValue(stat));
+        const points = toNumber(
+          extractStatValue(team.pointsById.get(cat.statId))
+        );
+        return { teamKey: team.teamKey, teamName: team.teamName, value, points };
+      })
+      .filter((entry) => entry.value !== null);
+
+    const sorted = entries.sort((a, b) =>
+      isLower ? a.value - b.value : b.value - a.value
+    );
+    const myIndex = sorted.findIndex((entry) => entry.teamKey === teamKey);
+    if (myIndex === -1) return;
+
+    const mySortedValue = sorted[myIndex].value;
+    let groupStart = myIndex;
+    while (groupStart > 0 && sorted[groupStart - 1].value === mySortedValue) {
+      groupStart -= 1;
+    }
+
+    if (groupStart === 0) {
+      gaps[cat.key] = {
+        direction: isLower ? "lower_is_better" : "higher_is_better",
+        myValue: mySortedValue,
+        myPoints,
+        nextTeamKey: null,
+        nextTeamName: null,
+        nextValue: null,
+        nextPoints: null,
+        deltaToNext: null,
+        pointsGainToNext: null,
+        status: "leading",
+      };
+      return;
+    }
+
+    const nextBetter = sorted[groupStart - 1];
+    const targetValue = nextBetter.value;
+    const delta = isLower ? mySortedValue - targetValue : targetValue - mySortedValue;
+    const pointsGain =
+      myPoints !== null && nextBetter.points !== null
+        ? nextBetter.points - myPoints
+        : null;
+
+    gaps[cat.key] = {
+      direction: isLower ? "lower_is_better" : "higher_is_better",
+      myValue: mySortedValue,
+      myPoints,
+      nextTeamKey: nextBetter.teamKey || null,
+      nextTeamName: nextBetter.teamName || null,
+      nextValue: targetValue,
+      nextPoints: nextBetter.points ?? null,
+      deltaToNext: delta,
+      pointsGainToNext: pointsGain,
+      status: "chasing",
+    };
+  });
+
+  return gaps;
 }
 
 function buildStaleRecommendations(snapshots) {
@@ -1821,7 +2166,7 @@ async function discover() {
   console.log("Saved leagueKey and teamKey to fantasy/config.json");
 }
 
-async function recommend() {
+async function recommend({ snapshotOnly = false } = {}) {
   const config = loadConfig();
   const leagueSettingsFile = loadLeagueSettingsFile();
   const accessToken = await getAccessToken(config);
@@ -1907,6 +2252,13 @@ async function recommend() {
       rankSource,
     };
   });
+
+  const categoryNextGaps = buildCategoryNextGaps(
+    resolvedCategories,
+    teamMetrics,
+    myTeamMetrics,
+    config.teamKey
+  );
 
   const statIdByKey = buildStatIdByKey(resolvedCategories);
   const abStatId = resolveStatIdByAliases(statNameMap, ["At Bats", "AB"]);
@@ -2015,6 +2367,7 @@ async function recommend() {
   if (summaryParts.length > 0) {
     console.log(fmtLine(summaryParts.join(" | ")));
   }
+  let pointsToNextTeam = null;
   if (totalPointsByTeam.size > 0) {
     const totals = teamMetrics
       .map((team) => ({
@@ -2029,6 +2382,11 @@ async function recommend() {
       const nextTeam = totals[myIndex - 1];
       const myTotal = totals[myIndex].totalPoints;
       const delta = nextTeam.totalPoints - myTotal;
+      pointsToNextTeam = {
+        delta: Number.isFinite(delta) ? delta : null,
+        nextTeamKey: nextTeam.teamKey || null,
+        nextTeamName: nextTeam.teamName || null,
+      };
       const deltaText =
         delta === 0 ? "0" : delta > 0 ? `+${delta.toFixed(1)}` : `${delta.toFixed(1)}`;
       console.log(cYellow(`Points to next team: ${deltaText} (${nextTeam.teamName})`));
@@ -2126,7 +2484,17 @@ async function recommend() {
       }
 
       if (efficiency !== null && pointsGain !== null) {
-        pointInfoByKey.set(cat.key, { pointsGain, directionText });
+        pointInfoByKey.set(cat.key, {
+          pointsGain,
+          directionText,
+          myValue: mySortedValue,
+          myPoints,
+          nextTeamKey: nextBetter.teamKey || null,
+          nextTeamName: nextBetter.teamName || null,
+          nextValue: targetValue,
+          nextPoints: nextBetter.points ?? null,
+          deltaToNext: delta,
+        });
         efficiencyRows.push({
           key: cat.key,
           name: cat.name,
@@ -2201,6 +2569,7 @@ async function recommend() {
   console.log("");
 
   let rosterState = [];
+  let rosterMappedPlayers = [];
   let addBattingCandidates = [];
   let addPitchingCandidates = [];
   let addGeneralCandidates = [];
@@ -2227,6 +2596,63 @@ async function recommend() {
     start: [],
     drop: [],
   };
+
+  if (snapshotOnly) {
+    // Minimal run: log snapshot + effectiveness without computing adds/drops/starts.
+    try {
+      const roster = await yahooRequest({
+        url: `${FANTASY_API_BASE}/team/${config.teamKey}/roster?format=json`,
+        accessToken,
+      });
+      const rosterPlayers = findAllValuesByKey(roster, "player");
+      rosterState = buildRosterState(rosterPlayers);
+      rosterMappedPlayers = rosterPlayers.map((player) => {
+        const name = extractPlayerName(player);
+        const positions = extractPlayerPositions(player);
+        const selected = extractSelectedPositions(player);
+        const rank = extractPlayerRank(player);
+        const playerKey = extractPlayerKey(player);
+        const stats = extractPlayerStats(player);
+        const status = extractPlayerStatus(player);
+        return {
+          name,
+          positions,
+          selected,
+          rank,
+          playerKey,
+          stats,
+          status,
+          isPitcher: isPitcherPositions(positions),
+          isBench: isBenchPosition(selected),
+          isIL: isILPosition(selected) || isILStatus(status),
+        };
+      });
+    } catch {
+      // ok: snapshot will still contain standings/category data
+    }
+
+    console.log(cYellow("Actions: snapshot-only (no recommendations computed)."));
+    console.log("");
+    await finalizeAndLogRun({
+      config,
+      overallRank,
+      seasonProgress,
+      gpValue,
+      ipValue,
+      gpCap,
+      ipCap,
+      resolvedCategories,
+      targetKeys,
+      bestValueTargets,
+      focusKeys,
+      pointsToNextTeam,
+      categoryNextGaps,
+      actionSuggestions,
+      rosterState,
+      learning,
+    });
+    return;
+  }
 
   try {
     const topLimit = getTopLimit(3);
@@ -2368,6 +2794,7 @@ async function recommend() {
           isIL: isILPosition(selected) || isILStatus(status),
         };
       });
+    rosterMappedPlayers = mappedPlayers;
     const activeCatchers = mappedPlayers.filter(
       (player) =>
         isCatcherPositions(player.positions) &&
@@ -2773,6 +3200,74 @@ async function recommend() {
     }
   }
 
+  // Unsupervised player archetypes: cluster free agents + roster players on (season + lastmonth) stat rates.
+  const isPitcherByKey = new Map();
+  rosterMappedPlayers.forEach((p) => {
+    if (p?.playerKey) isPitcherByKey.set(p.playerKey, !!p.isPitcher);
+  });
+  allAddCandidates.forEach((c) => {
+    if (c?.playerKey) isPitcherByKey.set(c.playerKey, !!c.isPitcher);
+  });
+  dropSuggestions.forEach((d) => {
+    if (d?.playerKey) isPitcherByKey.set(d.playerKey, !!d.isPitcher);
+  });
+
+  const archetypePoolKeys = uniqueLimit(
+    [
+      ...allAddCandidates.map((c) => c.playerKey),
+      ...rosterMappedPlayers.map((p) => p.playerKey),
+    ].filter(Boolean),
+    MAX_ARCHETYPE_KEYS
+  );
+
+  let archetypeSeasonStatsByKey = new Map();
+  let archetypeLastMonthStatsByKey = new Map();
+  if (archetypePoolKeys.length > 0) {
+    try {
+      const seasonRes = await fetchPlayerStatsByKeys({
+        accessToken,
+        playerKeys: archetypePoolKeys,
+        statTypeOverride: "season",
+      });
+      archetypeSeasonStatsByKey = seasonRes.statsByKey || new Map();
+    } catch {
+      archetypeSeasonStatsByKey = new Map();
+    }
+    try {
+      const lastRes = await fetchPlayerStatsByKeys({
+        accessToken,
+        playerKeys: archetypePoolKeys,
+        statTypeOverride: "lastmonth",
+      });
+      archetypeLastMonthStatsByKey = lastRes.statsByKey || new Map();
+    } catch {
+      archetypeLastMonthStatsByKey = new Map();
+    }
+  }
+
+  const hitterArchetypes = buildArchetypes({
+    poolPlayers: archetypePoolKeys.filter((pk) => isPitcherByKey.get(pk) === false),
+    isPitcher: false,
+    statKeys: battingCategories,
+    statIdByKey,
+    seasonStatsByKey: archetypeSeasonStatsByKey,
+    lastMonthStatsByKey: archetypeLastMonthStatsByKey,
+    abStatId,
+    ipStatId,
+    focusKeys,
+  });
+  const pitcherArchetypes = buildArchetypes({
+    poolPlayers: archetypePoolKeys.filter((pk) => isPitcherByKey.get(pk) === true),
+    isPitcher: true,
+    statKeys: pitchingCategories,
+    statIdByKey,
+    seasonStatsByKey: archetypeSeasonStatsByKey,
+    lastMonthStatsByKey: archetypeLastMonthStatsByKey,
+    abStatId,
+    ipStatId,
+    focusKeys,
+  });
+
   const hitterPoolKeys = uniqueLimit(
     [
       ...allAddCandidates.filter((c) => !c.isPitcher).map((c) => c.playerKey),
@@ -2837,9 +3332,14 @@ async function recommend() {
       ipStatId,
       zContext,
     });
+    const archetype = isPitcher
+      ? pitcherArchetypes.get(candidate.playerKey)
+      : hitterArchetypes.get(candidate.playerKey);
     return {
       ...candidate,
       statsScore: projected !== null && projected !== undefined ? projected : fallbackScore(candidate, isPitcher),
+      archetype: archetype?.label || null,
+      archetypeFitScore: archetype?.fitScore ?? 0,
     };
   };
 
@@ -2890,6 +3390,9 @@ async function recommend() {
     if (!candidates || candidates.length === 0) return;
     if (!label) return;
     const ordered = [...candidates].sort((a, b) => {
+      const aFit = a.archetypeFitScore ?? 0;
+      const bFit = b.archetypeFitScore ?? 0;
+      if (aFit !== bFit) return bFit - aFit;
       const aScore = a.statsScore ?? Number.NEGATIVE_INFINITY;
       const bScore = b.statsScore ?? Number.NEGATIVE_INFINITY;
       if (aScore === bScore) return 0;
@@ -2917,9 +3420,10 @@ async function recommend() {
     console.log(cYellow(label));
     eligible.forEach(({ item, dropName }) => {
       const position = item.positions.join(", ");
+      const tag = item.archetype ? ` [${item.archetype}]` : "";
       console.log(
         fmtBullet(
-          `${item.name} ${position ? `(${position})` : ""} -> drop ${dropName}`.trim()
+          `${item.name}${tag} ${position ? `(${position})` : ""} -> drop ${dropName}`.trim()
         )
       );
       addPrintedCount += 1;
@@ -3014,7 +3518,7 @@ async function recommend() {
     console.log("");
   }
 
-  const snapshot = buildSnapshot({
+  await finalizeAndLogRun({
     config,
     overallRank,
     seasonProgress,
@@ -3026,47 +3530,12 @@ async function recommend() {
     targetKeys,
     bestValueTargets,
     focusKeys,
+    pointsToNextTeam,
+    categoryNextGaps,
     actionSuggestions,
     rosterState,
-  });
-  appendJsonl(SNAPSHOT_LOG, snapshot);
-
-  const actionsLog = readJsonl(ACTION_LOG);
-  const snapshotsLog = readJsonl(SNAPSHOT_LOG);
-  const effectivenessLines = buildEffectivenessSummary(snapshotsLog, snapshot);
-  console.log(cYellow("Effectiveness since last run:"));
-  if (effectivenessLines && effectivenessLines.length > 0) {
-    effectivenessLines.forEach((line) => {
-      const trimmed = line.startsWith("- ") ? line.slice(2) : line;
-      console.log(fmtBullet(trimmed));
-    });
-  } else {
-    console.log(fmtBullet("No prior snapshot to compare."));
-  }
-  const updatedLearning = evaluateActions({
     learning,
-    actions: actionsLog,
-    snapshots: snapshotsLog,
-    currentSnapshot: snapshot,
   });
-  saveLearning(updatedLearning);
-  generateDashboardTo(null);
-
-  if (shouldPromptForLog()) {
-    const shouldLog = await promptYesNo("Log actions you actually made? (y/n): ");
-    if (shouldLog) {
-      const adds = await promptList("Adds (comma-separated, blank for none): ");
-      const drops = await promptList("Drops (comma-separated, blank for none): ");
-      const starts = await promptList("Starts (comma-separated, blank for none): ");
-      const benches = await promptList("Benches (comma-separated, blank for none): ");
-      const notes = await prompt("Notes (optional): ");
-      try {
-        logActionsEntry({ adds, drops, starts, benches, notes });
-      } catch (error) {
-        console.log(`Log actions failed: ${error.message}`);
-      }
-    }
-  }
 }
 
 function logActionsEntry({ adds, drops, starts, benches, notes }) {
@@ -3098,6 +3567,89 @@ async function logActions() {
   logActionsEntry({ adds, drops, starts, benches, notes });
 }
 
+async function finalizeAndLogRun({
+  config,
+  overallRank,
+  seasonProgress,
+  gpValue,
+  ipValue,
+  gpCap,
+  ipCap,
+  resolvedCategories,
+  targetKeys,
+  bestValueTargets,
+  focusKeys,
+  pointsToNextTeam,
+  categoryNextGaps,
+  actionSuggestions,
+  rosterState,
+  learning,
+}) {
+  const snapshot = buildSnapshot({
+    config,
+    overallRank,
+    seasonProgress,
+    gpValue,
+    ipValue,
+    gpCap,
+    ipCap,
+    resolvedCategories,
+    targetKeys,
+    bestValueTargets,
+    focusKeys,
+    pointsToNextTeam,
+    categoryNextGaps,
+    actionSuggestions,
+    rosterState,
+  });
+
+  const snapshotsBefore = readJsonl(SNAPSHOT_LOG);
+  const prevSnapshot =
+    snapshotsBefore.length > 0 ? snapshotsBefore[snapshotsBefore.length - 1] : null;
+  const inferred = prevSnapshot ? inferActions(prevSnapshot, snapshot) : null;
+  if (inferred) snapshot.inferredActionsFromPrev = inferred;
+  appendJsonl(SNAPSHOT_LOG, snapshot);
+
+  const actionsLog = readJsonl(ACTION_LOG);
+  const snapshotsLog = [...snapshotsBefore, snapshot];
+
+  const effectivenessLines = buildEffectivenessSummary(snapshotsLog, snapshot);
+  console.log(cYellow("Effectiveness since last run:"));
+  if (effectivenessLines && effectivenessLines.length > 0) {
+    effectivenessLines.forEach((line) => {
+      const trimmed = line.startsWith("- ") ? line.slice(2) : line;
+      console.log(fmtBullet(trimmed));
+    });
+  } else {
+    console.log(fmtBullet("No prior snapshot to compare."));
+  }
+
+  const updatedLearning = evaluateActions({
+    learning,
+    actions: actionsLog,
+    snapshots: snapshotsLog,
+    currentSnapshot: snapshot,
+  });
+  saveLearning(updatedLearning);
+  generateDashboardTo(null);
+
+  if (shouldPromptForLog()) {
+    const shouldLog = await promptYesNo("Log actions you actually made? (y/n): ");
+    if (shouldLog) {
+      const adds = await promptList("Adds (comma-separated, blank for none): ");
+      const drops = await promptList("Drops (comma-separated, blank for none): ");
+      const starts = await promptList("Starts (comma-separated, blank for none): ");
+      const benches = await promptList("Benches (comma-separated, blank for none): ");
+      const notes = await prompt("Notes (optional): ");
+      try {
+        logActionsEntry({ adds, drops, starts, benches, notes });
+      } catch (error) {
+        console.log(`Log actions failed: ${error.message}`);
+      }
+    }
+  }
+}
+
 async function main() {
   const command = process.argv[2];
 
@@ -3116,9 +3668,11 @@ async function main() {
       await dashboard();
     } else if (command === "recommend") {
       await recommend();
+    } else if (command === "snapshot") {
+      await recommend({ snapshotOnly: true });
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|log|recommend> [--top N] [--position C] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|log|recommend|snapshot> [--top N] [--position C] [--verbose]"
       );
     }
   } catch (error) {

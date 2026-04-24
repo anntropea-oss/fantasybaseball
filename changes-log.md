@@ -1,5 +1,13 @@
 # Changes Log
 
+## 2026-04-24
+- Added `snapshot` command to log standings/roster snapshots without generating recommendations.
+- Stored richer per-day snapshot fields: `pointsToNextTeam`, `categoryNextGaps`, and `inferredActionsFromPrev`.
+- Added unsupervised player archetype clustering (season + lastmonth stat vectors) and archetype tags on ADD recommendations.
+- Adjusted ADD ranking to prefer archetypes that fit current focus categories.
+- Made `fetchPlayerStatsByKeys` chunk large player-key requests to avoid URL length issues.
+- Added `scripts/run-daily.sh` helper for scheduled daily runs.
+
 ## 2026-04-03
 - Excluded IL players from START recommendations.
 - Excluded IL-status players from START even if not slotted on IL.
