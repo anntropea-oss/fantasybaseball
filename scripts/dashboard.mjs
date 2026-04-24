@@ -4,6 +4,7 @@ import path from "path";
 const ROOT = process.cwd();
 const SNAPSHOT_PATH = path.join(ROOT, "logs", "snapshots.jsonl");
 const OUT_PATH = path.join(ROOT, "logs", "dashboard.html");
+const UNSUPERVISED_PATH = path.join(ROOT, "logs", "unsupervised.json");
 
 function parseArgs(argv) {
   const args = { days: 30, mode: "daily", out: OUT_PATH };
@@ -307,6 +308,53 @@ function svgScatter({ title, xName, yName, x, y, width = 980, height = 260 }) {
 </svg>`.trim();
 }
 
+function svgClusterBand({ title, xLabels, clusters, width = 980, height = 86 }) {
+  const padding = { l: 48, r: 18, t: 28, b: 20 };
+  const w = width;
+  const h = height;
+  const innerW = w - padding.l - padding.r;
+  const xCount = Math.max(1, xLabels.length - 1);
+  const xPos = (i) => padding.l + (innerW * i) / xCount;
+  const barH = 18;
+  const y = padding.t + 8;
+  const palette = ["#0ea5e9", "#22c55e", "#f97316", "#a855f7", "#ef4444", "#14b8a6", "#64748b", "#f59e0b"];
+  const rects = clusters
+    .map((c, i) => {
+      const x1 = xPos(i);
+      const x2 = xPos(i + 1);
+      const color = palette[(c ?? 0) % palette.length];
+      return `<rect x="${x1.toFixed(1)}" y="${y}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${barH}" fill="${color}" opacity="0.85" />`;
+    })
+    .join("\n");
+  const xTickEvery = Math.max(1, Math.ceil(xLabels.length / 10));
+  const xTicks = xLabels
+    .map((lbl, i) => ({ lbl, i }))
+    .filter((t) => t.i % xTickEvery === 0 || t.i === xLabels.length - 1);
+  const xTicksSvg = xTicks
+    .map((t) => {
+      const x = xPos(t.i).toFixed(1);
+      return `<g><line x1="${x}" x2="${x}" y1="${h - padding.b}" y2="${h - padding.b + 4}" stroke="#9ca3af" /><text x="${x}" y="${h - 6}" text-anchor="middle" font-size="11" fill="#6b7280">${escapeHtml(t.lbl.slice(5))}</text></g>`;
+    })
+    .join("\n");
+  const uniq = [...new Set(clusters.filter((c) => c !== null && c !== undefined))].sort((a, b) => a - b);
+  const legend = uniq
+    .slice(0, 8)
+    .map((c, idx) => {
+      const color = palette[c % palette.length];
+      return `<g transform="translate(${padding.l + idx * 110},${padding.t - 10})"><rect width="10" height="10" fill="${color}" /><text x="16" y="10" font-size="12" fill="#1f2937">C${c}</text></g>`;
+    })
+    .join("");
+  return `
+<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" role="img" aria-label="${escapeHtml(title)}">
+  <rect x="0" y="0" width="${w}" height="${h}" fill="#ffffff" />
+  <text x="${padding.l}" y="18" font-size="14" fill="#111827" font-weight="600">${escapeHtml(title)}</text>
+  ${legend}
+  ${rects}
+  <line x1="${padding.l}" x2="${w - padding.r}" y1="${h - padding.b}" y2="${h - padding.b}" stroke="#9ca3af" />
+  ${xTicksSvg}
+</svg>`.trim();
+}
+
 const args = parseArgs(process.argv.slice(2));
 const snaps = readJsonl(SNAPSHOT_PATH);
 if (snaps.length < 2) {
@@ -328,6 +376,18 @@ const ranks = filtered.map((s) => toNumber(s.overallRank));
 const totalPoints = filtered.map((s) => sumPoints(s));
 const focusPoints = filtered.map((s) => sumFocusPoints(s));
 const saves = filtered.map((s) => toNumber(getCategory(s, "SV")?.value));
+
+let clusterAssignments = null;
+if (fs.existsSync(UNSUPERVISED_PATH)) {
+  try {
+    const unsup = JSON.parse(fs.readFileSync(UNSUPERVISED_PATH, "utf8"));
+    const assigns = unsup?.best?.assignments || [];
+    const byDate = new Map(assigns.map((a) => [a.date, a.cluster]));
+    clusterAssignments = dates.map((d) => (byDate.has(d) ? byDate.get(d) : null));
+  } catch {
+    clusterAssignments = null;
+  }
+}
 
 const pairs = [];
 for (let i = 1; i < filtered.length; i += 1) {
@@ -398,6 +458,16 @@ const html = `<!doctype html>
       </div>
     </div>
 
+    ${
+      clusterAssignments
+        ? `<div class="card">${svgClusterBand({
+            title: "Unsupervised Regime Clusters (Best Model)",
+            xLabels: dates,
+            clusters: clusterAssignments,
+          })}<div class="tiny">Clusters are learned from the last N days of snapshots; they group similar team states. Use them as a “regime” tracker, not a guarantee.</div></div>`
+        : ""
+    }
+
     <div class="row">
       <div class="card">
         ${svgLineChart({
@@ -432,4 +502,3 @@ const html = `<!doctype html>
 fs.mkdirSync(path.dirname(args.out), { recursive: true });
 fs.writeFileSync(args.out, html);
 console.log(`Wrote ${args.out}`);
-

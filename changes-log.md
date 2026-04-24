@@ -41,6 +41,7 @@
 - Added auto-generated visual dashboard at /Users/atropea/coding/fantasy baseball/fantasy/logs/dashboard.html.
 - Added `dashboard` command to generate and open the dashboard from the CLI.
 - Added `dashboard --publish` to write `docs/index.html` for GitHub Pages hosting.
+- Added unsupervised clustering experiments and dashboard “regime” band using `logs/snapshots.jsonl`.
 - Tightened drop logic by skipping players with strong Yahoo ranks.
 - Prioritized RP adds when SV is a target for better saves streaming.
 - Expanded add focus to include best-value targets (e.g., SV) in addition to weakest categories.

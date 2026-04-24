@@ -115,6 +115,14 @@ function shouldGenerateDashboard() {
 function generateDashboardTo(outPath = null) {
   if (!shouldGenerateDashboard()) return;
   try {
+    try {
+      const unsupPath = path.join(__dirname, "scripts", "unsupervised.mjs");
+      execFileSync(process.execPath, [unsupPath, "--days", "30", "--daily"], {
+        stdio: "ignore",
+      });
+    } catch {
+      // best-effort
+    }
     const scriptPath = path.join(__dirname, "scripts", "dashboard.mjs");
     const args = [scriptPath, "--days", "30", "--daily"];
     if (outPath) args.push("--out", outPath);

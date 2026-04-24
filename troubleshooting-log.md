@@ -302,3 +302,8 @@ This log captures each major step taken, problems encountered, and the fix appli
     - Step: Publish dashboard output to a GitHub Pages-friendly path.
     - Problem: `logs/dashboard.html` is ignored by git and can’t be shared as a URL.
     - Solution: Added `node cli.js dashboard --publish` to generate `docs/index.html` so GitHub Pages can serve it.
+
+57. **Add unsupervised “regime” experiments**
+    - Step: Run clustering experiments on snapshot features (category points + meta).
+    - Problem: Wanted model discovery without hand-picking a supervised target.
+    - Solution: Added `scripts/unsupervised.mjs` to cluster “team state regimes” and write `logs/unsupervised.json`, then the dashboard renders a cluster band over time.
