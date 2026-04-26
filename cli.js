@@ -646,6 +646,206 @@ function isBenchPosition(positions) {
   return positions.some((pos) => ["BN", "BE"].includes(pos));
 }
 
+function normalizeSlot(slot) {
+  if (!slot) return null;
+  const s = String(slot).trim();
+  return s ? s.toUpperCase() : null;
+}
+
+function isNonBenchSlot(slot) {
+  const s = normalizeSlot(slot);
+  if (!s) return false;
+  return !["BN", "BE", "IL", "IL+", "IR"].includes(s);
+}
+
+function canUseSlot(player, slot) {
+  const s = normalizeSlot(slot);
+  if (!s || !isNonBenchSlot(s)) return false;
+  if (s === "UTIL") return !player.isPitcher;
+  if (s === "P") return !!player.isPitcher;
+  const eligible = (player.positions || []).map((p) => normalizeSlot(p)).filter(Boolean);
+  return eligible.includes(s);
+}
+
+function computeLineupOpenSlots(rosterPositions, mappedPlayers) {
+  const openSlots = [];
+  if (!Array.isArray(rosterPositions) || rosterPositions.length === 0) return openSlots;
+  const cap = new Map();
+  rosterPositions.forEach((slot) => {
+    const s = normalizeSlot(slot);
+    if (!s || !isNonBenchSlot(s)) return;
+    cap.set(s, (cap.get(s) || 0) + 1);
+  });
+
+  const used = new Map();
+  (mappedPlayers || []).forEach((p) => {
+    const slot = normalizeSlot(extractPrimarySelectedPosition(p.selected));
+    if (!slot || !isNonBenchSlot(slot)) return;
+    used.set(slot, (used.get(slot) || 0) + 1);
+  });
+
+  cap.forEach((count, slot) => {
+    const remaining = count - (used.get(slot) || 0);
+    for (let i = 0; i < remaining; i += 1) openSlots.push(slot);
+  });
+
+  return openSlots;
+}
+
+function preferredStartSlots(player) {
+  const eligible = (player.positions || []).map((p) => normalizeSlot(p)).filter(Boolean);
+  const seen = new Set();
+  const out = [];
+  const push = (s) => {
+    const v = normalizeSlot(s);
+    if (!v || seen.has(v)) return;
+    seen.add(v);
+    out.push(v);
+  };
+
+  if (player.isPitcher) {
+    // Prefer role slots before generic P.
+    eligible.forEach((s) => {
+      if (s === "SP" || s === "RP") push(s);
+    });
+    push("P");
+    eligible.forEach((s) => push(s));
+    return out;
+  }
+
+  eligible.forEach((s) => push(s));
+  push("UTIL");
+  return out;
+}
+
+function pickWorstStarter(starters, statKeys, statIdByKey) {
+  if (!starters || starters.length === 0) return null;
+  const scored = starters.map((p) => {
+    const score = computeStatScore(p.stats, statKeys, statIdByKey);
+    const rank = p.rank === null || p.rank === undefined ? 9999 : p.rank;
+    return { p, score: score === null || score === undefined ? Number.NEGATIVE_INFINITY : score, rank };
+  });
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return a.score - b.score; // lower = worse
+    return b.rank - a.rank; // higher rank number = worse
+  });
+  return scored[0]?.p || null;
+}
+
+function buildStartPlans({
+  startSelections,
+  rosterMappedPlayers,
+  rosterPositions,
+  battingCategories,
+  pitchingCategories,
+  focusKeys,
+  statIdByKey,
+}) {
+  const plans = [];
+  if (!Array.isArray(startSelections) || startSelections.length === 0) return plans;
+  const roster = Array.isArray(rosterMappedPlayers) ? rosterMappedPlayers : [];
+
+  const starters = roster.filter((p) => {
+    const slot = normalizeSlot(extractPrimarySelectedPosition(p.selected));
+    return slot && isNonBenchSlot(slot) && !p.isIL;
+  });
+
+  const openSlots = computeLineupOpenSlots(rosterPositions, roster);
+  const remainingOpenSlots = openSlots.slice();
+  const usedBenchKeys = new Set();
+
+  const focusSet = new Set(Array.isArray(focusKeys) ? focusKeys : []);
+  const statKeysFor = (isPitcher) => {
+    const cats = isPitcher ? pitchingCategories : battingCategories;
+    const focused = cats.filter((k) => focusSet.has(k));
+    return focused.length > 0 ? focused : cats;
+  };
+
+  // Build fast lookup by slot.
+  const startersBySlot = new Map();
+  starters.forEach((p) => {
+    const slot = normalizeSlot(extractPrimarySelectedPosition(p.selected));
+    if (!slot) return;
+    if (!startersBySlot.has(slot)) startersBySlot.set(slot, []);
+    startersBySlot.get(slot).push(p);
+  });
+
+  const takeOpenSlot = (preferredSlots, player) => {
+    for (let i = 0; i < preferredSlots.length; i += 1) {
+      const slot = preferredSlots[i];
+      if (!canUseSlot(player, slot)) continue;
+      const idx = remainingOpenSlots.findIndex((s) => s === slot);
+      if (idx !== -1) {
+        remainingOpenSlots.splice(idx, 1);
+        return slot;
+      }
+    }
+    return null;
+  };
+
+  const pickBenchForSlot = (slot, player) => {
+    const list = startersBySlot.get(slot) || [];
+    const filtered = list.filter((p) => p.playerKey && !usedBenchKeys.has(p.playerKey));
+    if (filtered.length === 0) return null;
+    const bench = pickWorstStarter(filtered, statKeysFor(player.isPitcher), statIdByKey);
+    if (bench?.playerKey) usedBenchKeys.add(bench.playerKey);
+    return bench || null;
+  };
+
+  startSelections.forEach((player) => {
+    const preferred = preferredStartSlots(player);
+
+    const open = takeOpenSlot(preferred, player);
+    if (open) {
+      plans.push({
+        name: player.name,
+        playerKey: player.playerKey,
+        startSlot: open,
+        benchName: null,
+        benchSlot: null,
+        note: "open slot",
+      });
+      return;
+    }
+
+    // Replace the worst starter in any slot we can play.
+    let best = null;
+    preferred.forEach((slot) => {
+      if (!canUseSlot(player, slot)) return;
+      const bench = pickBenchForSlot(slot, player);
+      if (!bench) return;
+      best = best || { slot, bench };
+      // Prefer benching an unavailable player if possible.
+      const benchUnavailable = isUnavailableStatus(bench.status) || bench.isIL;
+      if (benchUnavailable) best = { slot, bench };
+    });
+
+    if (best) {
+      plans.push({
+        name: player.name,
+        playerKey: player.playerKey,
+        startSlot: best.slot,
+        benchName: best.bench.name,
+        benchSlot: normalizeSlot(extractPrimarySelectedPosition(best.bench.selected)),
+        note: null,
+      });
+      return;
+    }
+
+    // Fallback: no clear swap found.
+    plans.push({
+      name: player.name,
+      playerKey: player.playerKey,
+      startSlot: null,
+      benchName: null,
+      benchSlot: null,
+      note: "no eligible slot found",
+    });
+  });
+
+  return plans;
+}
+
 function isILStatus(status) {
   if (!status) return false;
   const normalized = status.toString().trim().toUpperCase();
@@ -2583,6 +2783,7 @@ async function recommend({ snapshotOnly = false } = {}) {
   let battingFocusKeys = [];
   let pitchingFocusKeys = [];
   let startSelections = [];
+  let startPlans = [];
   let startLabel = null;
   let startMessage = null;
   let dropHeader = null;
@@ -2878,6 +3079,15 @@ async function recommend({ snapshotOnly = false } = {}) {
           battingNeeds || pitchingNeeds
             ? "START (bench fits needs):"
             : "START (bench best available):";
+        startPlans = buildStartPlans({
+          startSelections,
+          rosterMappedPlayers: mappedPlayers,
+          rosterPositions: leagueSettingsFile?.rosterPositions || [],
+          battingCategories,
+          pitchingCategories,
+          focusKeys,
+          statIdByKey,
+        });
       } else {
         startMessage = "START: none (bench does not fit needs).";
       }
@@ -3461,12 +3671,25 @@ async function recommend({ snapshotOnly = false } = {}) {
   if (startSelections.length > 0) {
     printActionsHeader();
     console.log(cYellow(startLabel));
-    startSelections.forEach((player) => {
-      const position = player.positions.join(", ");
+    const plans = startPlans && startPlans.length > 0 ? startPlans : startSelections.map((p) => ({ name: p.name, startSlot: null, benchName: null, benchSlot: null, note: null, positions: p.positions }));
+    plans.forEach((plan, idx) => {
+      const base = startSelections[idx];
+      const position = base?.positions?.join(", ") || "";
+      const slotText = plan.startSlot ? ` at ${plan.startSlot}` : "";
+      const benchText =
+        plan.benchName && plan.benchSlot
+          ? ` -> bench ${plan.benchName} (${plan.benchSlot})`
+          : plan.note
+            ? ` (${plan.note})`
+            : plan.benchName
+              ? ` -> bench ${plan.benchName}`
+              : "";
       console.log(
-        fmtBullet(`${player.name} ${position ? `(${position})` : ""}`.trim())
+        fmtBullet(
+          `Start ${plan.name}${slotText} ${position ? `(${position})` : ""}${benchText}`.trim()
+        )
       );
-      actionSuggestions.start.push(player.name);
+      actionSuggestions.start.push(plan.name);
     });
   } else if (startMessage) {
     printActionsHeader();

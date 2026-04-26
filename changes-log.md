@@ -8,6 +8,9 @@
 - Made `fetchPlayerStatsByKeys` chunk large player-key requests to avoid URL length issues.
 - Added `scripts/run-daily.sh` helper for scheduled daily runs.
 
+## 2026-04-26
+- START recommendations now include a suggested lineup slot and the starter to bench.
+
 ## 2026-04-03
 - Excluded IL players from START recommendations.
 - Excluded IL-status players from START even if not slotted on IL.
