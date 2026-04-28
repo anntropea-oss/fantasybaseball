@@ -1280,6 +1280,19 @@ function buildEffectivenessSummary(snapshots, currentSnapshot) {
     lines.push(
       `- Lineup adherence: ${adherence.matched}/${adherence.recommendedCount} recommended starts used`
     );
+    if (adherence.matched < adherence.recommendedCount) {
+      const recommended = prevSnapshot.actions?.start || [];
+      const prevByName = new Map((prevSnapshot.roster || []).map((p) => [p.name, p]));
+      const currByName = new Map((currentSnapshot.roster || []).map((p) => [p.name, p]));
+      recommended.slice(0, 5).forEach((name) => {
+        const a = prevByName.get(name);
+        const b = currByName.get(name);
+        const prevSlot = a?.selectedPrimary || (a?.selected?.[0] ?? null);
+        const currSlot = b?.selectedPrimary || (b?.selected?.[0] ?? null);
+        if (!prevSlot && !currSlot) return;
+        lines.push(`- Adherence detail: ${name} ${prevSlot || "?"} -> ${currSlot || "?"}`);
+      });
+    }
   }
   const prevRank = toNumber(prevSnapshot.overallRank);
   const currRank = toNumber(currentSnapshot.overallRank);
@@ -1342,11 +1355,37 @@ function computeStartAdherence(baseSnapshot, currentSnapshot) {
   if (!Array.isArray(recommended) || recommended.length === 0) {
     return { recommendedCount: 0, matched: 0, adherence: 1 };
   }
+
+  // Two notions of "used":
+  // 1) inferred start (player moved from BN -> active between snapshots)
+  // 2) active now (player is currently in an active slot)
+  // We report inferredStarts for debugging, but count a recommendation as "used" if it is
+  // active now OR it was inferred as started (covers cases where player stays active across runs).
   const inferred = inferActions(baseSnapshot, currentSnapshot);
-  const actualStarts = new Set(inferred?.starts || []);
-  const matched = recommended.filter((name) => actualStarts.has(name)).length;
+  const inferredStarts = new Set(inferred?.starts || []);
+
+  const isBench = (selected) =>
+    Array.isArray(selected) &&
+    selected.some((pos) => ["BN", "BE"].includes(String(pos).toUpperCase()));
+  const activeNow = new Set(
+    (currentSnapshot.roster || [])
+      .filter((p) => !isBench(p.selected))
+      .map((p) => p.name)
+  );
+
+  const matched = recommended.filter(
+    (name) => inferredStarts.has(name) || activeNow.has(name)
+  ).length;
   const adherence = recommended.length > 0 ? matched / recommended.length : 1;
-  return { recommendedCount: recommended.length, matched, adherence };
+  return {
+    recommendedCount: recommended.length,
+    matched,
+    adherence,
+    debug: {
+      inferredStarts: [...inferredStarts],
+      activeNowMatches: recommended.filter((name) => activeNow.has(name)),
+    },
+  };
 }
 
 function isMeaningfulUpgrade(addRank, dropRank) {

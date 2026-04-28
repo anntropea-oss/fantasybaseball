@@ -11,6 +11,9 @@
 ## 2026-04-26
 - START recommendations now include a suggested lineup slot and the starter to bench.
 
+## 2026-04-28
+- Improved lineup adherence tracking and added per-player adherence details (shows each recommended starter's slot change, e.g. `BN -> SP`).
+
 ## 2026-04-03
 - Excluded IL players from START recommendations.
 - Excluded IL-status players from START even if not slotted on IL.
