@@ -13,6 +13,7 @@
 
 ## 2026-04-28
 - Improved lineup adherence tracking and added per-player adherence details (shows each recommended starter's slot change, e.g. `BN -> SP`).
+- Effectiveness/adherence now compares against the most recent snapshot from a different date (avoids false 0/3 when running `recommend` multiple times in one day).
 
 ## 2026-04-03
 - Excluded IL players from START recommendations.

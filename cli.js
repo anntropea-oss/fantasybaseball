@@ -1271,8 +1271,19 @@ function formatStatValue(value, statKey) {
 
 function buildEffectivenessSummary(snapshots, currentSnapshot) {
   if (!snapshots || snapshots.length < 2) return null;
-  const prevSnapshot = snapshots[snapshots.length - 2];
-  if (!prevSnapshot || prevSnapshot.id === currentSnapshot.id) return null;
+  // Compare against the most recent snapshot from a *different date*.
+  // Users often run `recommend` multiple times per day, and comparing
+  // "last run" can incorrectly report 0 adherence if no lineup changes occurred
+  // between two runs on the same date.
+  let prevSnapshot = null;
+  for (let i = snapshots.length - 2; i >= 0; i -= 1) {
+    const s = snapshots[i];
+    if (!s || s.id === currentSnapshot.id) continue;
+    if (s.date && currentSnapshot.date && s.date === currentSnapshot.date) continue;
+    prevSnapshot = s;
+    break;
+  }
+  if (!prevSnapshot) return null;
 
   const lines = [];
   const adherence = computeStartAdherence(prevSnapshot, currentSnapshot);
