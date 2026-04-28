@@ -900,6 +900,14 @@ async function fetchRosterWithStats({ accessToken, teamKey }) {
   return { roster, statType: null, hasStats: false };
 }
 
+async function fetchRosterForDate({ accessToken, teamKey, dateStr }) {
+  const roster = await yahooRequest({
+    url: `${FANTASY_API_BASE}/team/${teamKey}/roster;date=${dateStr}?format=json`,
+    accessToken,
+  });
+  return roster;
+}
+
 async function fetchPlayerStatsByKeys({ accessToken, playerKeys, statTypeOverride = null }) {
   const statTypes = statTypeOverride ? [statTypeOverride] : ["lastmonth", "lastweek", "season"];
   if (!playerKeys || playerKeys.length === 0) {
@@ -3840,6 +3848,110 @@ async function logActions() {
   logActionsEntry({ adds, drops, starts, benches, notes });
 }
 
+function addDaysLocalDateString(baseDateStr, days) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(baseDateStr || "").trim());
+  if (!m) return baseDateStr;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(y, mo - 1, d);
+  dt.setDate(dt.getDate() + days);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+function renderLineup({ dateStr, rosterPayload }) {
+  const payloadDate = findFirstValueByKey(rosterPayload, "date");
+  const players = findAllValuesByKey(rosterPayload, "player");
+  const mapped = players
+    .map((player) => {
+      const name = extractPlayerName(player);
+      const positions = extractPlayerPositions(player);
+      const selected = extractSelectedPositions(player);
+      const status = extractPlayerStatus(player);
+      return {
+        name,
+        positions,
+        selected,
+        selectedPrimary: extractPrimarySelectedPosition(selected),
+        status,
+        isPitcher: isPitcherPositions(positions),
+        isIL: isILPosition(selected) || isILStatus(status),
+      };
+    })
+    .filter((p) => p.name);
+
+  const slotOrder = [
+    "C",
+    "1B",
+    "2B",
+    "3B",
+    "SS",
+    "OF",
+    "UTIL",
+    "SP",
+    "RP",
+    "P",
+    "BN",
+    "IL",
+  ];
+  const bySlot = new Map();
+  mapped.forEach((p) => {
+    const slot = normalizeSlot(p.selectedPrimary) || "UNK";
+    if (!bySlot.has(slot)) bySlot.set(slot, []);
+    bySlot.get(slot).push(p);
+  });
+
+  const title = payloadDate && payloadDate !== dateStr ? `${dateStr} (API date ${payloadDate})` : dateStr;
+  console.log(cYellow(`Lineup ${title}:`));
+
+  const printGroup = (label, slots) => {
+    const out = [];
+    slots.forEach((slot) => {
+      const list = bySlot.get(slot) || [];
+      list.forEach((p) => out.push({ slot, p }));
+    });
+    if (out.length === 0) return;
+    console.log(fmtLine(label));
+    out.forEach(({ slot, p }) => {
+      const pos = (p.positions || []).join(", ");
+      const status = p.status ? ` ${p.status}` : "";
+      console.log(fmtBullet(`${slot}: ${p.name}${status}${pos ? ` (${pos})` : ""}`.trim()));
+    });
+  };
+
+  printGroup("Active:", slotOrder.filter((s) => !["BN", "IL"].includes(s)));
+  printGroup("Bench/IL:", ["BN", "IL"]);
+
+  const unknown = [...bySlot.keys()].filter((k) => !slotOrder.includes(k));
+  if (unknown.length > 0) {
+    console.log(fmtLine("Other:"));
+    unknown.forEach((slot) => {
+      (bySlot.get(slot) || []).forEach((p) => {
+        const pos = (p.positions || []).join(", ");
+        console.log(fmtBullet(`${slot}: ${p.name}${pos ? ` (${pos})` : ""}`.trim()));
+      });
+    });
+  }
+  console.log("");
+}
+
+async function lineup() {
+  const config = loadConfig();
+  const accessToken = await getAccessToken(config);
+  if (!config.teamKey) throw new Error("Missing teamKey. Run: node fantasy/cli.js discover");
+
+  const today = todayDateString();
+  const tomorrow = addDaysLocalDateString(today, 1);
+
+  const rosterToday = await fetchRosterForDate({ accessToken, teamKey: config.teamKey, dateStr: today });
+  const rosterTomorrow = await fetchRosterForDate({ accessToken, teamKey: config.teamKey, dateStr: tomorrow });
+  renderLineup({ dateStr: today, rosterPayload: rosterToday });
+  renderLineup({ dateStr: tomorrow, rosterPayload: rosterTomorrow });
+}
+
 async function finalizeAndLogRun({
   config,
   overallRank,
@@ -3943,9 +4055,11 @@ async function main() {
       await recommend();
     } else if (command === "snapshot") {
       await recommend({ snapshotOnly: true });
+    } else if (command === "lineup") {
+      await lineup();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|log|recommend|snapshot> [--top N] [--position C] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|log|recommend|snapshot|lineup> [--top N] [--position C] [--verbose]"
       );
     }
   } catch (error) {

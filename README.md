@@ -25,6 +25,12 @@ node cli.js discover
 node cli.js recommend
 ```
 
+Check your lineup slot assignments for today + tomorrow (direct from Yahoo API):
+
+```bash
+node cli.js lineup
+```
+
 Optional: log a snapshot without computing recommendations (useful for daily tracking even on “busy” days).
 
 ```bash
