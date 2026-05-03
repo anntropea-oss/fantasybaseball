@@ -4,6 +4,9 @@
 - Added local SQLite storage at `logs/fantasy.db` while keeping JSONL logs as a backup/export path.
 - Added normalized SQLite tables for snapshots, category standings, category gaps, lineup slots, recommendations, inferred actions, and manual action logs.
 - Added `db-backfill` command to import existing JSONL history into SQLite.
+- Added explanation metadata to recommendations and persisted it in snapshots/SQLite.
+- Updated dashboard generation to read from SQLite first with JSONL fallback.
+- Added `review` command to generate a local decision review screen for the latest recommendation.
 
 ## 2026-04-24
 - Added `snapshot` command to log standings/roster snapshots without generating recommendations.

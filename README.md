@@ -50,6 +50,12 @@ node cli.js db-backfill
 node cli.js dashboard --open-dashboard
 ```
 
+Open the decision review page for the latest recommendation.
+
+```bash
+node cli.js review --open-dashboard
+```
+
 7. Publish the dashboard to GitHub Pages output (writes `docs/index.html`).
 
 ```bash
@@ -61,6 +67,7 @@ node cli.js dashboard --publish
 - The CLI stores OAuth tokens at `.tokens.json`.
 - If you play multiple leagues, `discover` will list them and pick the first. You can edit `leagueKey` and `teamKey` in `config.json` after discovery.
 - SQLite data is stored locally at `logs/fantasy.db`; JSONL logs are still written as a backup/export path.
+- The dashboard reads from `logs/fantasy.db` first, then falls back to `logs/snapshots.jsonl`.
 - For recurring runs, you can call `scripts/run-daily.sh` from cron/launchd.
 
 ## Branch Helpers

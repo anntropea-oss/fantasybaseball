@@ -456,13 +456,16 @@ async function writeSnapshotToDb(snapshot) {
     });
 
     Object.entries(snapshot.actions || {}).forEach(([type, names]) => {
+      const details = Array.isArray(snapshot.actionDetails?.[type])
+        ? snapshot.actionDetails[type]
+        : [];
       (Array.isArray(names) ? names : []).forEach((name, idx) => {
         runStmt(
           db,
           `INSERT INTO recommendations (
             snapshot_id, action_type, player_name, ordinal, raw_json
           ) VALUES (?, ?, ?, ?, ?)`,
-          [snapshot.id, type, name, idx, jsonText({ type, name })]
+          [snapshot.id, type, name, idx, jsonText(details[idx] || { type, name })]
         );
       });
     });
@@ -530,6 +533,20 @@ async function backfillDb() {
   }
   console.log(`Backfilled SQLite: ${snapshots.length} snapshots, ${actions.length} action logs`);
   console.log(`Database: ${DB_PATH}`);
+}
+
+async function latestSnapshotFromDb() {
+  try {
+    const db = await getDb();
+    const row = db
+      .prepare("SELECT raw_json FROM snapshots ORDER BY timestamp DESC LIMIT 1")
+      .get();
+    if (row?.raw_json) return JSON.parse(row.raw_json);
+  } catch {
+    // Fall back to JSONL below.
+  }
+  const snapshots = readJsonl(SNAPSHOT_LOG);
+  return snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
 }
 
 function loadLearning() {
@@ -626,6 +643,21 @@ function fmtBullet(text) {
 
 function fmtLine(text) {
   return cGreen(text);
+}
+
+function formatMaybeNumber(value, digits = 2) {
+  const n = toNumber(value);
+  if (n === null) return "n/a";
+  return Number.isInteger(n) ? `${n}` : n.toFixed(digits);
+}
+
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function getListArg(flag) {
@@ -1327,6 +1359,7 @@ function buildSnapshot({
   pointsToNextTeam,
   categoryNextGaps,
   actionSuggestions,
+  actionDetails,
   rosterState,
 }) {
   const snapshotId = new Date().toISOString();
@@ -1360,6 +1393,7 @@ function buildSnapshot({
     bestValueTargets,
     categories,
     actions: actionSuggestions,
+    actionDetails: actionDetails || {},
     roster: rosterState || [],
   };
 }
@@ -3164,6 +3198,13 @@ async function recommend({ snapshotOnly = false } = {}) {
     start: [],
     drop: [],
   };
+  const actionDetails = {
+    addBatting: [],
+    addPitching: [],
+    add: [],
+    start: [],
+    drop: [],
+  };
 
   if (snapshotOnly) {
     // Minimal run: log snapshot + effectiveness without computing adds/drops/starts.
@@ -3216,6 +3257,7 @@ async function recommend({ snapshotOnly = false } = {}) {
       pointsToNextTeam,
       categoryNextGaps,
       actionSuggestions,
+      actionDetails,
       rosterState,
       learning,
     });
@@ -3495,13 +3537,16 @@ async function recommend({ snapshotOnly = false } = {}) {
           dropLines.push(
             `- ${player.name} ${position ? `(${position})` : ""} (${statusText})`.trim()
           );
-          dropSuggestions.push({
-            name: player.name,
-            playerKey: player.playerKey,
-            isPitcher: player.isPitcher,
-            rank: player.rank,
-            statusDrop: true,
-          });
+            dropSuggestions.push({
+              name: player.name,
+              playerKey: player.playerKey,
+              isPitcher: player.isPitcher,
+              rank: player.rank,
+              statusDrop: true,
+              positions: player.positions,
+              status: player.status,
+              reason: `Status ${statusText} makes this the safest roster churn.`,
+            });
         });
         dropPrinted = true;
       }
@@ -3547,6 +3592,9 @@ async function recommend({ snapshotOnly = false } = {}) {
               rank: player.rank,
               statsScore: player.score,
               statusDrop: false,
+              positions: player.positions,
+              status: player.status,
+              reason: `Lowest bench fit by recent ${statType} stats for ${weakKeysForType(player.isPitcher).join(", ")}.`,
             });
           });
           dropPrinted = true;
@@ -3581,6 +3629,9 @@ async function recommend({ snapshotOnly = false } = {}) {
               isPitcher: player.isPitcher,
               rank: player.rank,
               statusDrop: false,
+              positions: player.positions,
+              status: player.status,
+              reason: `Lowest bench Yahoo rank among safe drop candidates.`,
             });
           });
         }
@@ -3614,6 +3665,9 @@ async function recommend({ snapshotOnly = false } = {}) {
               isPitcher: player.isPitcher,
               rank: player.rank,
               statusDrop: false,
+              positions: player.positions,
+              status: player.status,
+              reason: `Secondary bench rank candidate after stricter drop checks found no option.`,
             });
           });
         }
@@ -3961,6 +4015,7 @@ async function recommend({ snapshotOnly = false } = {}) {
   dropPitchersQueue = dropSuggestions
     .filter((drop) => drop.isPitcher)
     .map((d) => ({ ...d }));
+  const dropByName = new Map(dropSuggestions.map((drop) => [drop.name, drop]));
 
   let addPrintedCount = 0;
   const printAddCandidates = (label, candidates, isPitcher) => {
@@ -4004,12 +4059,29 @@ async function recommend({ snapshotOnly = false } = {}) {
         )
       );
       addPrintedCount += 1;
+      const detail = {
+        action: "ADD",
+        playerName: item.name,
+        playerKey: item.playerKey || null,
+        positions: item.positions || [],
+        pairedDrop: dropName,
+        pairedDropReason: dropByName.get(dropName)?.reason || null,
+        targetCategories: item.isPitcher ? pitchingStatKeys : battingStatKeys,
+        archetype: item.archetype || null,
+        archetypeFitScore: item.archetypeFitScore ?? null,
+        statsScore: item.statsScore ?? null,
+        yahooRank: item.rank ?? null,
+        why: `Targets ${((item.isPitcher ? pitchingStatKeys : battingStatKeys) || []).join(", ")}; ${item.archetype ? `${item.archetype} archetype; ` : ""}paired with ${dropName} for a net roster move.`,
+      };
       if (isPitcher === null) {
         actionSuggestions.add.push(item.name);
+        actionDetails.add.push(detail);
       } else if (isPitcher) {
         actionSuggestions.addPitching.push(item.name);
+        actionDetails.addPitching.push(detail);
       } else {
         actionSuggestions.addBatting.push(item.name);
+        actionDetails.addBatting.push(detail);
       }
     });
   };
@@ -4057,6 +4129,19 @@ async function recommend({ snapshotOnly = false } = {}) {
         )
       );
       actionSuggestions.start.push(plan.name);
+      actionDetails.start.push({
+        action: "START",
+        playerName: plan.name,
+        playerKey: plan.playerKey || base?.playerKey || null,
+        positions: base?.positions || [],
+        startSlot: plan.startSlot || null,
+        benchName: plan.benchName || null,
+        benchSlot: plan.benchSlot || null,
+        targetCategories: base?.isPitcher ? pitchingStatKeys : battingStatKeys,
+        why: plan.note
+          ? `Fits ${base?.isPitcher ? "pitching" : "batting"} targets but ${plan.note}.`
+          : `Fits ${base?.isPitcher ? "pitching" : "batting"} targets (${(base?.isPitcher ? pitchingStatKeys : battingStatKeys).join(", ")}); start at ${plan.startSlot || "eligible slot"}${plan.benchName ? ` over ${plan.benchName}` : ""}.`,
+      });
     });
     console.log(
       fmtLine("Note: apply these swaps manually after Yahoo Start Active Players, or Yahoo may overwrite them.")
@@ -4074,6 +4159,17 @@ async function recommend({ snapshotOnly = false } = {}) {
       console.log(fmtBullet(trimmed));
       if (dropSuggestions[idx]) {
         actionSuggestions.drop.push(dropSuggestions[idx].name);
+        actionDetails.drop.push({
+          action: "DROP",
+          playerName: dropSuggestions[idx].name,
+          playerKey: dropSuggestions[idx].playerKey || null,
+          positions: dropSuggestions[idx].positions || [],
+          status: dropSuggestions[idx].status || null,
+          yahooRank: dropSuggestions[idx].rank ?? null,
+          statsScore: dropSuggestions[idx].statsScore ?? null,
+          statusDrop: !!dropSuggestions[idx].statusDrop,
+          why: dropSuggestions[idx].reason || "Safe drop candidate based on current roster rules.",
+        });
       }
     });
   } else if (dropMessage) {
@@ -4126,6 +4222,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     pointsToNextTeam,
     categoryNextGaps,
     actionSuggestions,
+    actionDetails,
     rosterState,
     learning,
   });
@@ -4279,6 +4376,114 @@ async function lineup() {
   }
 }
 
+function flattenActionDetails(snapshot) {
+  const details = snapshot?.actionDetails || {};
+  const actions = snapshot?.actions || {};
+  const rows = [];
+  const addRow = (type, detail, idx) => {
+    rows.push({
+      type,
+      idx,
+      playerName: detail?.playerName || detail?.name || null,
+      detail: detail || {},
+    });
+  };
+
+  ["addBatting", "addPitching", "add", "start", "drop"].forEach((type) => {
+    const typeDetails = Array.isArray(details[type]) ? details[type] : [];
+    const names = Array.isArray(actions[type]) ? actions[type] : [];
+    if (typeDetails.length > 0) {
+      typeDetails.forEach((detail, idx) => addRow(type, detail, idx));
+      return;
+    }
+    names.forEach((name, idx) => addRow(type, { playerName: name, why: "No detailed explanation stored for this older run." }, idx));
+  });
+  return rows;
+}
+
+function actionTypeLabel(type) {
+  if (type === "addBatting" || type === "addPitching" || type === "add") return "ADD";
+  if (type === "start") return "START";
+  if (type === "drop") return "DROP";
+  return type.toUpperCase();
+}
+
+function reviewCard(row) {
+  const d = row.detail || {};
+  const label = actionTypeLabel(row.type);
+  const parts = [];
+  if (label === "ADD" && d.pairedDrop) parts.push(`Drop ${d.pairedDrop}`);
+  if (label === "START" && d.startSlot) parts.push(`Start at ${d.startSlot}`);
+  if (label === "START" && d.benchName) parts.push(`Bench ${d.benchName}${d.benchSlot ? ` (${d.benchSlot})` : ""}`);
+  if (label === "DROP" && d.status) parts.push(`Status ${d.status}`);
+  if (d.targetCategories?.length) parts.push(`Targets ${d.targetCategories.join(", ")}`);
+  if (d.archetype) parts.push(`Archetype ${d.archetype}`);
+  if (d.yahooRank !== null && d.yahooRank !== undefined) parts.push(`Yahoo rank ${d.yahooRank}`);
+  if (d.statsScore !== null && d.statsScore !== undefined) parts.push(`Score ${formatMaybeNumber(d.statsScore)}`);
+
+  return `
+    <article class="item">
+      <div class="pill">${escapeHtml(label)}</div>
+      <h2>${escapeHtml(d.playerName || row.playerName || "Unknown")}</h2>
+      ${parts.length > 0 ? `<div class="sub">${parts.map(escapeHtml).join(" · ")}</div>` : ""}
+      <p>${escapeHtml(d.why || "No explanation stored.")}</p>
+      ${d.pairedDropReason ? `<p class="muted">Drop reason: ${escapeHtml(d.pairedDropReason)}</p>` : ""}
+    </article>
+  `;
+}
+
+async function review() {
+  const snapshot = await latestSnapshotFromDb();
+  if (!snapshot) {
+    console.log("No recommendations found. Run recommend first.");
+    return;
+  }
+  const rows = flattenActionDetails(snapshot);
+  const outPath = path.join(LOG_DIR, "decision-review.html");
+  const targetSummary = (snapshot.focusTargets || snapshot.targets || []).join(", ") || "none";
+  const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fantasy Decision Review</title>
+  <style>
+    :root { --bg:#f7f7f4; --ink:#172019; --muted:#5c655e; --line:#d7ddd4; --card:#ffffff; --accent:#1f7a4d; --warn:#9f6a00; }
+    body { margin:0; background:var(--bg); color:var(--ink); font-family: Avenir Next, Verdana, sans-serif; }
+    main { max-width: 980px; margin: 24px auto 48px; padding: 0 16px; }
+    header { border-bottom:1px solid var(--line); padding-bottom:14px; margin-bottom:16px; }
+    h1 { font-size: 24px; margin:0 0 6px; }
+    .meta { color:var(--muted); font-size:13px; }
+    .notice { border:1px solid #d9c48f; background:#fff8df; color:#4b3500; padding:10px 12px; border-radius:6px; margin: 14px 0; }
+    .grid { display:grid; grid-template-columns:1fr; gap:10px; }
+    @media (min-width: 760px) { .grid { grid-template-columns:1fr 1fr; } }
+    .item { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
+    .pill { display:inline-block; font-size:11px; font-weight:700; color:white; background:var(--accent); border-radius:999px; padding:3px 8px; margin-bottom:8px; }
+    h2 { font-size:18px; margin:0 0 6px; }
+    p { margin:8px 0 0; line-height:1.4; }
+    .sub, .muted { color:var(--muted); font-size:13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Decision Review</h1>
+      <div class="meta">${escapeHtml(snapshot.date)} · ${escapeHtml(snapshot.leagueName || snapshot.leagueKey)} · ${escapeHtml(snapshot.teamName || snapshot.teamKey)} · rank ${escapeHtml(snapshot.overallRank)}</div>
+      <div class="meta">Focus targets: ${escapeHtml(targetSummary)}</div>
+    </header>
+    <div class="notice">Apply Yahoo Start Active Players first, then make these swaps manually. Clicking it again can overwrite the swaps.</div>
+    <section class="grid">
+      ${rows.length > 0 ? rows.map(reviewCard).join("\n") : "<p>No action recommendations in the latest snapshot.</p>"}
+    </section>
+  </main>
+</body>
+</html>`;
+  ensureLogDir();
+  fs.writeFileSync(outPath, html);
+  console.log(`Decision review: ${outPath}`);
+  if (shouldOpenDashboard()) openDashboardFile(outPath);
+}
+
 async function finalizeAndLogRun({
   config,
   overallRank,
@@ -4294,6 +4499,7 @@ async function finalizeAndLogRun({
   pointsToNextTeam,
   categoryNextGaps,
   actionSuggestions,
+  actionDetails,
   rosterState,
   learning,
 }) {
@@ -4312,6 +4518,7 @@ async function finalizeAndLogRun({
     pointsToNextTeam,
     categoryNextGaps,
     actionSuggestions,
+    actionDetails,
     rosterState,
   });
 
@@ -4381,6 +4588,8 @@ async function main() {
       await dashboard();
     } else if (command === "db-backfill") {
       await backfillDb();
+    } else if (command === "review") {
+      await review();
     } else if (command === "recommend") {
       await recommend();
     } else if (command === "snapshot") {
@@ -4389,7 +4598,7 @@ async function main() {
       await lineup();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|db-backfill|log|recommend|snapshot|lineup> [--top N] [--position C] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|db-backfill|log|recommend|review|snapshot|lineup> [--top N] [--position C] [--verbose]"
       );
     }
   } catch (error) {

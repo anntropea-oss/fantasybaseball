@@ -5,6 +5,14 @@ const ROOT = process.cwd();
 const SNAPSHOT_PATH = path.join(ROOT, "logs", "snapshots.jsonl");
 const OUT_PATH = path.join(ROOT, "logs", "dashboard.html");
 const UNSUPERVISED_PATH = path.join(ROOT, "logs", "unsupervised.json");
+const DB_PATH = path.join(ROOT, "logs", "fantasy.db");
+
+const emitWarning = process.emitWarning.bind(process);
+process.emitWarning = (warning, ...args) => {
+  const message = typeof warning === "string" ? warning : warning?.message;
+  if (String(message).includes("SQLite")) return;
+  return emitWarning(warning, ...args);
+};
 
 function parseArgs(argv) {
   const args = { days: 30, mode: "daily", out: OUT_PATH };
@@ -69,6 +77,27 @@ function readJsonl(filePath) {
       }
     })
     .filter(Boolean);
+}
+
+async function readSnapshotsFromSqlite() {
+  if (!fs.existsSync(DB_PATH)) return null;
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(DB_PATH, { readOnly: true });
+    const rows = db.prepare("SELECT raw_json FROM snapshots ORDER BY timestamp ASC").all();
+    db.close();
+    return rows
+      .map((row) => {
+        try {
+          return JSON.parse(row.raw_json);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
 }
 
 function pickSnapshots(snaps, mode) {
@@ -356,7 +385,9 @@ function svgClusterBand({ title, xLabels, clusters, width = 980, height = 86 }) 
 }
 
 const args = parseArgs(process.argv.slice(2));
-const snaps = readJsonl(SNAPSHOT_PATH);
+const dbSnaps = await readSnapshotsFromSqlite();
+const snaps = dbSnaps && dbSnaps.length > 0 ? dbSnaps : readJsonl(SNAPSHOT_PATH);
+const dataSource = dbSnaps && dbSnaps.length > 0 ? "logs/fantasy.db" : "logs/snapshots.jsonl";
 if (snaps.length < 2) {
   console.log("Not enough snapshots to build dashboard.");
   process.exit(0);
@@ -438,7 +469,7 @@ const html = `<!doctype html>
 <body>
   <div class="wrap">
     <h1>Fantasy Baseball Tracker</h1>
-    <div class="meta">Built from <code>logs/snapshots.jsonl</code> • Window: ${escapeHtml(dates[0])} → ${escapeHtml(dates.at(-1))} • Mode: ${escapeHtml(args.mode)} • Updated: ${escapeHtml(new Date().toISOString())}</div>
+    <div class="meta">Built from <code>${escapeHtml(dataSource)}</code> • Window: ${escapeHtml(dates[0])} → ${escapeHtml(dates.at(-1))} • Mode: ${escapeHtml(args.mode)} • Updated: ${escapeHtml(new Date().toISOString())}</div>
 
     <div class="row">
       <div class="card">
