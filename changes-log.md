@@ -1,5 +1,10 @@
 # Changes Log
 
+## 2026-05-03
+- Added local SQLite storage at `logs/fantasy.db` while keeping JSONL logs as a backup/export path.
+- Added normalized SQLite tables for snapshots, category standings, category gaps, lineup slots, recommendations, inferred actions, and manual action logs.
+- Added `db-backfill` command to import existing JSONL history into SQLite.
+
 ## 2026-04-24
 - Added `snapshot` command to log standings/roster snapshots without generating recommendations.
 - Stored richer per-day snapshot fields: `pointsToNextTeam`, `categoryNextGaps`, and `inferredActionsFromPrev`.

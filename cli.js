@@ -18,6 +18,7 @@ const SNAPSHOT_LOG = path.join(LOG_DIR, "snapshots.jsonl");
 const ACTION_LOG = path.join(LOG_DIR, "actions.jsonl");
 const DAILY_LOG = path.join(LOG_DIR, "daily-log.md");
 const LEARNING_PATH = path.join(LOG_DIR, "learning.json");
+const DB_PATH = path.join(LOG_DIR, "fantasy.db");
 const DROP_RANK_FLOOR = 120;
 const DROP_RANK_FLOOR_SECONDARY = 80;
 const ADD_RANK_IMPROVEMENT = 30;
@@ -36,6 +37,15 @@ const MAX_ARCHETYPE_KEYS = 120;
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
 const FANTASY_API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2";
+
+const emitWarning = process.emitWarning.bind(process);
+process.emitWarning = (warning, ...args) => {
+  const message = typeof warning === "string" ? warning : warning?.message;
+  if (String(message).includes("SQLite")) {
+    return;
+  }
+  return emitWarning(warning, ...args);
+};
 
 function loadConfig() {
   let config = {};
@@ -221,6 +231,305 @@ function readJsonl(filePath) {
       }
     })
     .filter(Boolean);
+}
+
+let dbPromise = null;
+
+function jsonText(value) {
+  return JSON.stringify(value ?? null);
+}
+
+async function getDb() {
+  if (dbPromise) return dbPromise;
+  dbPromise = (async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    ensureLogDir();
+    const db = new DatabaseSync(DB_PATH);
+    db.exec("PRAGMA foreign_keys = ON;");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS snapshots (
+        id TEXT PRIMARY KEY,
+        date TEXT,
+        timestamp TEXT,
+        league_key TEXT,
+        team_key TEXT,
+        league_name TEXT,
+        team_name TEXT,
+        overall_rank REAL,
+        season_progress REAL,
+        gp_value REAL,
+        gp_cap REAL,
+        ip_value REAL,
+        ip_cap REAL,
+        points_to_next_delta REAL,
+        points_to_next_team_key TEXT,
+        points_to_next_team_name TEXT,
+        raw_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS category_standings (
+        snapshot_id TEXT NOT NULL,
+        category_key TEXT NOT NULL,
+        stat_id TEXT,
+        name TEXT,
+        value REAL,
+        points REAL,
+        rank REAL,
+        rank_source TEXT,
+        PRIMARY KEY (snapshot_id, category_key),
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS category_next_gaps (
+        snapshot_id TEXT NOT NULL,
+        category_key TEXT NOT NULL,
+        direction TEXT,
+        my_value REAL,
+        my_points REAL,
+        next_team_key TEXT,
+        next_team_name TEXT,
+        next_value REAL,
+        next_points REAL,
+        delta_to_next REAL,
+        points_gain_to_next REAL,
+        status TEXT,
+        PRIMARY KEY (snapshot_id, category_key),
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS lineup_slots (
+        snapshot_id TEXT NOT NULL,
+        player_key TEXT NOT NULL,
+        player_name TEXT,
+        selected_primary TEXT,
+        selected_json TEXT,
+        PRIMARY KEY (snapshot_id, player_key),
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS recommendations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        snapshot_id TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        player_name TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        raw_json TEXT,
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS inferred_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        snapshot_id TEXT NOT NULL,
+        source_snapshot_id TEXT,
+        action_type TEXT NOT NULL,
+        player_name TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        raw_json TEXT,
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS action_logs (
+        id TEXT PRIMARY KEY,
+        date TEXT,
+        snapshot_id TEXT,
+        adds_json TEXT,
+        drops_json TEXT,
+        starts_json TEXT,
+        benches_json TEXT,
+        notes TEXT,
+        raw_json TEXT NOT NULL
+      );
+    `);
+    return db;
+  })();
+  return dbPromise;
+}
+
+function runStmt(db, sql, params = []) {
+  db.prepare(sql).run(...params);
+}
+
+async function writeSnapshotToDb(snapshot) {
+  if (!snapshot?.id) return;
+  const db = await getDb();
+  const ptn = snapshot.pointsToNextTeam || {};
+  db.exec("BEGIN;");
+  try {
+    runStmt(
+      db,
+      `INSERT OR REPLACE INTO snapshots (
+        id, date, timestamp, league_key, team_key, league_name, team_name,
+        overall_rank, season_progress, gp_value, gp_cap, ip_value, ip_cap,
+        points_to_next_delta, points_to_next_team_key, points_to_next_team_name,
+        raw_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        snapshot.id,
+        snapshot.date || null,
+        snapshot.timestamp || null,
+        snapshot.leagueKey || null,
+        snapshot.teamKey || null,
+        snapshot.leagueName || null,
+        snapshot.teamName || null,
+        toNumber(snapshot.overallRank),
+        toNumber(snapshot.seasonProgress),
+        toNumber(snapshot.gpValue),
+        toNumber(snapshot.gpCap),
+        toNumber(snapshot.ipValue),
+        toNumber(snapshot.ipCap),
+        toNumber(ptn.delta),
+        ptn.nextTeamKey || null,
+        ptn.nextTeamName || null,
+        jsonText(snapshot),
+      ]
+    );
+
+    [
+      "category_standings",
+      "category_next_gaps",
+      "lineup_slots",
+      "recommendations",
+      "inferred_actions",
+    ].forEach((table) => {
+      runStmt(db, `DELETE FROM ${table} WHERE snapshot_id = ?`, [snapshot.id]);
+    });
+
+    (snapshot.categories || []).forEach((cat) => {
+      runStmt(
+        db,
+        `INSERT INTO category_standings (
+          snapshot_id, category_key, stat_id, name, value, points, rank, rank_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          snapshot.id,
+          cat.key || null,
+          cat.statId || null,
+          cat.name || null,
+          toNumber(cat.value),
+          toNumber(cat.points),
+          toNumber(cat.rank),
+          cat.rankSource || null,
+        ]
+      );
+    });
+
+    Object.entries(snapshot.categoryNextGaps || {}).forEach(([key, gap]) => {
+      runStmt(
+        db,
+        `INSERT INTO category_next_gaps (
+          snapshot_id, category_key, direction, my_value, my_points,
+          next_team_key, next_team_name, next_value, next_points,
+          delta_to_next, points_gain_to_next, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          snapshot.id,
+          key,
+          gap.direction || null,
+          toNumber(gap.myValue),
+          toNumber(gap.myPoints),
+          gap.nextTeamKey || null,
+          gap.nextTeamName || null,
+          toNumber(gap.nextValue),
+          toNumber(gap.nextPoints),
+          toNumber(gap.deltaToNext),
+          toNumber(gap.pointsGainToNext),
+          gap.status || null,
+        ]
+      );
+    });
+
+    (snapshot.roster || []).forEach((player) => {
+      if (!player.playerKey) return;
+      runStmt(
+        db,
+        `INSERT INTO lineup_slots (
+          snapshot_id, player_key, player_name, selected_primary, selected_json
+        ) VALUES (?, ?, ?, ?, ?)`,
+        [
+          snapshot.id,
+          player.playerKey,
+          player.name || null,
+          player.selectedPrimary || null,
+          jsonText(player.selected || []),
+        ]
+      );
+    });
+
+    Object.entries(snapshot.actions || {}).forEach(([type, names]) => {
+      (Array.isArray(names) ? names : []).forEach((name, idx) => {
+        runStmt(
+          db,
+          `INSERT INTO recommendations (
+            snapshot_id, action_type, player_name, ordinal, raw_json
+          ) VALUES (?, ?, ?, ?, ?)`,
+          [snapshot.id, type, name, idx, jsonText({ type, name })]
+        );
+      });
+    });
+
+    const inferred = snapshot.inferredActionsFromPrev || null;
+    if (inferred) {
+      ["adds", "drops", "starts", "benches"].forEach((type) => {
+        (Array.isArray(inferred[type]) ? inferred[type] : []).forEach((name, idx) => {
+          runStmt(
+            db,
+            `INSERT INTO inferred_actions (
+              snapshot_id, source_snapshot_id, action_type, player_name, ordinal, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              snapshot.id,
+              inferred.snapshotId || null,
+              type,
+              name,
+              idx,
+              jsonText({ type, name, source: inferred.source || null }),
+            ]
+          );
+        });
+      });
+    }
+
+    db.exec("COMMIT;");
+  } catch (error) {
+    db.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+async function writeActionLogToDb(actionEntry) {
+  if (!actionEntry?.id) return;
+  const db = await getDb();
+  runStmt(
+    db,
+    `INSERT OR REPLACE INTO action_logs (
+      id, date, snapshot_id, adds_json, drops_json, starts_json,
+      benches_json, notes, raw_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      actionEntry.id,
+      actionEntry.date || null,
+      actionEntry.snapshotId || null,
+      jsonText(actionEntry.adds || []),
+      jsonText(actionEntry.drops || []),
+      jsonText(actionEntry.starts || []),
+      jsonText(actionEntry.benches || []),
+      actionEntry.notes || "",
+      jsonText(actionEntry),
+    ]
+  );
+}
+
+async function backfillDb() {
+  const snapshots = readJsonl(SNAPSHOT_LOG);
+  const actions = readJsonl(ACTION_LOG);
+  for (const snapshot of snapshots) {
+    await writeSnapshotToDb(snapshot);
+  }
+  for (const action of actions) {
+    await writeActionLogToDb(action);
+  }
+  console.log(`Backfilled SQLite: ${snapshots.length} snapshots, ${actions.length} action logs`);
+  console.log(`Database: ${DB_PATH}`);
 }
 
 function loadLearning() {
@@ -3822,7 +4131,7 @@ async function recommend({ snapshotOnly = false } = {}) {
   });
 }
 
-function logActionsEntry({ adds, drops, starts, benches, notes }) {
+async function logActionsEntry({ adds, drops, starts, benches, notes }) {
   const snapshots = readJsonl(SNAPSHOT_LOG);
   if (snapshots.length === 0) {
     throw new Error("No snapshots found. Run recommend first.");
@@ -3839,6 +4148,7 @@ function logActionsEntry({ adds, drops, starts, benches, notes }) {
     notes: notes || "",
   };
   appendJsonl(ACTION_LOG, actionEntry);
+  await writeActionLogToDb(actionEntry);
   console.log("Logged actions for last recommendation.");
 }
 
@@ -3848,7 +4158,7 @@ async function logActions() {
   const starts = getListArg("--start");
   const benches = getListArg("--bench");
   const notes = getArgValue("--notes");
-  logActionsEntry({ adds, drops, starts, benches, notes });
+  await logActionsEntry({ adds, drops, starts, benches, notes });
 }
 
 function addDaysLocalDateString(baseDateStr, days) {
@@ -4011,6 +4321,7 @@ async function finalizeAndLogRun({
   const inferred = prevSnapshot ? inferActions(prevSnapshot, snapshot) : null;
   if (inferred) snapshot.inferredActionsFromPrev = inferred;
   appendJsonl(SNAPSHOT_LOG, snapshot);
+  await writeSnapshotToDb(snapshot);
 
   const actionsLog = readJsonl(ACTION_LOG);
   const snapshotsLog = [...snapshotsBefore, snapshot];
@@ -4044,7 +4355,7 @@ async function finalizeAndLogRun({
       const benches = await promptList("Benches (comma-separated, blank for none): ");
       const notes = await prompt("Notes (optional): ");
       try {
-        logActionsEntry({ adds, drops, starts, benches, notes });
+        await logActionsEntry({ adds, drops, starts, benches, notes });
       } catch (error) {
         console.log(`Log actions failed: ${error.message}`);
       }
@@ -4068,6 +4379,8 @@ async function main() {
       await discover();
     } else if (command === "dashboard") {
       await dashboard();
+    } else if (command === "db-backfill") {
+      await backfillDb();
     } else if (command === "recommend") {
       await recommend();
     } else if (command === "snapshot") {
@@ -4076,7 +4389,7 @@ async function main() {
       await lineup();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|log|recommend|snapshot|lineup> [--top N] [--position C] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|db-backfill|log|recommend|snapshot|lineup> [--top N] [--position C] [--verbose]"
       );
     }
   } catch (error) {

@@ -38,6 +38,12 @@ Optional: log a snapshot without computing recommendations (useful for daily tra
 node cli.js snapshot
 ```
 
+Backfill the local SQLite database from existing JSONL logs:
+
+```bash
+node cli.js db-backfill
+```
+
 6. Open the dashboard.
 
 ```bash
@@ -54,6 +60,7 @@ node cli.js dashboard --publish
 
 - The CLI stores OAuth tokens at `.tokens.json`.
 - If you play multiple leagues, `discover` will list them and pick the first. You can edit `leagueKey` and `teamKey` in `config.json` after discovery.
+- SQLite data is stored locally at `logs/fantasy.db`; JSONL logs are still written as a backup/export path.
 - For recurring runs, you can call `scripts/run-daily.sh` from cron/launchd.
 
 ## Branch Helpers
