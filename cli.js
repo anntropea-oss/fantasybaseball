@@ -3862,9 +3862,12 @@ function addDaysLocalDateString(baseDateStr, days) {
   return `${yy}-${mm}-${dd}`;
 }
 
-function renderLineup({ dateStr, rosterPayload }) {
+function renderLineup({ dateStr, rosterPayload, playerFilter = [] }) {
   const payloadDate = findFirstValueByKey(rosterPayload, "date");
   const players = findAllValuesByKey(rosterPayload, "player");
+  const filterSet = new Set(
+    (playerFilter || []).map((name) => name.trim().toLowerCase()).filter(Boolean)
+  );
   const mapped = players
     .map((player) => {
       const name = extractPlayerName(player);
@@ -3881,7 +3884,8 @@ function renderLineup({ dateStr, rosterPayload }) {
         isIL: isILPosition(selected) || isILStatus(status),
       };
     })
-    .filter((p) => p.name);
+    .filter((p) => p.name)
+    .filter((p) => filterSet.size === 0 || filterSet.has(p.name.toLowerCase()));
 
   const slotOrder = [
     "C",
@@ -3943,13 +3947,23 @@ async function lineup() {
   const accessToken = await getAccessToken(config);
   if (!config.teamKey) throw new Error("Missing teamKey. Run: node fantasy/cli.js discover");
 
+  const dateArg = getArgValue("--date");
+  const playerFilter = [
+    ...getListArg("--player"),
+    ...getListArg("--players"),
+  ];
   const today = todayDateString();
   const tomorrow = addDaysLocalDateString(today, 1);
 
-  const rosterToday = await fetchRosterForDate({ accessToken, teamKey: config.teamKey, dateStr: today });
-  const rosterTomorrow = await fetchRosterForDate({ accessToken, teamKey: config.teamKey, dateStr: tomorrow });
-  renderLineup({ dateStr: today, rosterPayload: rosterToday });
-  renderLineup({ dateStr: tomorrow, rosterPayload: rosterTomorrow });
+  const dates = dateArg ? [dateArg] : [today, tomorrow];
+  for (const dateStr of dates) {
+    const roster = await fetchRosterForDate({
+      accessToken,
+      teamKey: config.teamKey,
+      dateStr,
+    });
+    renderLineup({ dateStr, rosterPayload: roster, playerFilter });
+  }
 }
 
 async function finalizeAndLogRun({

@@ -29,6 +29,7 @@ Check your lineup slot assignments for today + tomorrow (direct from Yahoo API):
 
 ```bash
 node cli.js lineup
+node cli.js lineup --date 2026-05-03 --players "Bryce Elder,Steven Matz,Colin Rea"
 ```
 
 Optional: log a snapshot without computing recommendations (useful for daily tracking even on “busy” days).
