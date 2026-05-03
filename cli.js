@@ -1,4 +1,5 @@
 import fs from "fs";
+import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import readline from "readline";
@@ -4484,6 +4485,495 @@ async function review() {
   if (shouldOpenDashboard()) openDashboardFile(outPath);
 }
 
+function parseAppLimit(raw, fallback = 90) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.floor(n), 365);
+}
+
+function parseAppPort(raw, fallback = 8787) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.floor(n), 65535);
+}
+
+async function appSnapshots(limit = 90) {
+  try {
+    const db = await getDb();
+    const rows = db
+      .prepare("SELECT raw_json FROM snapshots ORDER BY timestamp DESC LIMIT ?")
+      .all(limit);
+    return rows
+      .map((row) => {
+        try {
+          return JSON.parse(row.raw_json);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .reverse();
+  } catch {
+    return readJsonl(SNAPSHOT_LOG).slice(-limit);
+  }
+}
+
+function appLatestByDate(snapshots) {
+  const byDate = new Map();
+  (snapshots || []).forEach((snapshot) => {
+    const key = snapshot?.date || snapshot?.timestamp || snapshot?.id;
+    if (key) byDate.set(key, snapshot);
+  });
+  return [...byDate.values()];
+}
+
+function appTotalPoints(snapshot) {
+  return (snapshot?.categories || []).reduce((sum, cat) => {
+    const points = toNumber(cat.points);
+    return sum + (points ?? 0);
+  }, 0);
+}
+
+function appCategoryMap(snapshot) {
+  const out = {};
+  (snapshot?.categories || []).forEach((cat) => {
+    out[cat.key] = {
+      key: cat.key,
+      name: cat.name || cat.key,
+      value: cat.value,
+      points: cat.points,
+      rank: cat.rank,
+    };
+  });
+  return out;
+}
+
+function appSnapshotSummary(snapshot) {
+  const ptn = snapshot?.pointsToNextTeam || {};
+  return {
+    id: snapshot?.id || null,
+    date: snapshot?.date || null,
+    timestamp: snapshot?.timestamp || snapshot?.id || null,
+    leagueName: snapshot?.leagueName || snapshot?.leagueKey || null,
+    teamName: snapshot?.teamName || snapshot?.teamKey || null,
+    overallRank: snapshot?.overallRank ?? null,
+    seasonProgress: snapshot?.seasonProgress ?? null,
+    gpValue: snapshot?.gpValue ?? null,
+    gpCap: snapshot?.gpCap ?? null,
+    ipValue: snapshot?.ipValue ?? null,
+    ipCap: snapshot?.ipCap ?? null,
+    totalPoints: appTotalPoints(snapshot),
+    pointsToNextTeam: ptn,
+    targets: snapshot?.focusTargets || snapshot?.targets || [],
+    bestValueTargets: snapshot?.bestValueTargets || [],
+    categories: appCategoryMap(snapshot),
+  };
+}
+
+function appLineupFromSnapshot(snapshot) {
+  const groups = { active: [], bench: [], il: [], other: [] };
+  const slotOrder = [
+    "C",
+    "1B",
+    "2B",
+    "3B",
+    "SS",
+    "CI",
+    "MI",
+    "OF",
+    "Util",
+    "SP",
+    "RP",
+    "P",
+    "BN",
+    "IL",
+  ];
+  const slotRank = new Map(slotOrder.map((slot, idx) => [slot.toUpperCase(), idx]));
+  (snapshot?.roster || []).forEach((player) => {
+    const selected = Array.isArray(player.selected) ? player.selected : [];
+    const slot = player.selectedPrimary || selected[0] || "?";
+    const row = {
+      name: player.name,
+      slot,
+      selected,
+      positions: player.positions || [],
+      status: player.status || null,
+    };
+    const slotUpper = String(slot).toUpperCase();
+    const statusUpper = String(player.status || "").toUpperCase();
+    if (slotUpper === "IL" || statusUpper === "IL") {
+      groups.il.push(row);
+    } else if (slotUpper === "BN" || slotUpper === "BE") {
+      groups.bench.push(row);
+    } else if (slotRank.has(slotUpper)) {
+      groups.active.push(row);
+    } else {
+      groups.other.push(row);
+    }
+  });
+  const sortBySlot = (a, b) => {
+    const aRank = slotRank.get(String(a.slot).toUpperCase()) ?? 999;
+    const bRank = slotRank.get(String(b.slot).toUpperCase()) ?? 999;
+    return aRank - bRank || String(a.name || "").localeCompare(String(b.name || ""));
+  };
+  Object.values(groups).forEach((items) => items.sort(sortBySlot));
+  return groups;
+}
+
+async function appLatestPayload() {
+  const snapshots = await appSnapshots(90);
+  const snapshot = snapshots[snapshots.length - 1] || (await latestSnapshotFromDb());
+  return {
+    generatedAt: new Date().toISOString(),
+    source: fs.existsSync(DB_PATH) ? "sqlite" : "jsonl",
+    summary: appSnapshotSummary(snapshot),
+    snapshot,
+    recommendations: flattenActionDetails(snapshot),
+    effectiveness: buildEffectivenessSummary(snapshots, snapshot) || [],
+  };
+}
+
+async function appSnapshotsPayload(url) {
+  const limit = parseAppLimit(url.searchParams.get("limit"), 90);
+  const daily = url.searchParams.get("daily") !== "0";
+  const snapshots = await appSnapshots(limit);
+  const selected = daily ? appLatestByDate(snapshots) : snapshots;
+  return {
+    count: selected.length,
+    snapshots: selected.map(appSnapshotSummary),
+  };
+}
+
+async function appRecommendationsPayload(url) {
+  const limit = parseAppLimit(url.searchParams.get("limit"), 20);
+  const snapshots = await appSnapshots(limit);
+  const rows = snapshots.flatMap((snapshot) =>
+    flattenActionDetails(snapshot).map((row) => ({
+      snapshotId: snapshot.id,
+      date: snapshot.date,
+      type: actionTypeLabel(row.type),
+      playerName: row.playerName,
+      detail: row.detail,
+    }))
+  );
+  return {
+    count: rows.length,
+    recommendations: rows,
+  };
+}
+
+async function appLineupPayload() {
+  const snapshot = await latestSnapshotFromDb();
+  return {
+    date: snapshot?.date || null,
+    snapshotId: snapshot?.id || null,
+    lineup: appLineupFromSnapshot(snapshot),
+  };
+}
+
+async function appEffectivenessPayload() {
+  const snapshots = await appSnapshots(60);
+  const daily = appLatestByDate(snapshots);
+  const latest = daily[daily.length - 1] || snapshots[snapshots.length - 1] || null;
+  const rows = [];
+  for (let i = 1; i < daily.length; i += 1) {
+    const prev = daily[i - 1];
+    const curr = daily[i];
+    const adherence = computeStartAdherence(prev, curr);
+    rows.push({
+      fromDate: prev.date,
+      toDate: curr.date,
+      rankBefore: prev.overallRank,
+      rankAfter: curr.overallRank,
+      rankDelta:
+        toNumber(prev.overallRank) !== null && toNumber(curr.overallRank) !== null
+          ? toNumber(prev.overallRank) - toNumber(curr.overallRank)
+          : null,
+      pointsBefore: appTotalPoints(prev),
+      pointsAfter: appTotalPoints(curr),
+      adherence,
+      targets: prev.focusTargets || prev.targets || [],
+    });
+  }
+  return {
+    latestSummary: latest ? buildEffectivenessSummary(snapshots, latest) || [] : [],
+    rows: rows.slice(-30),
+  };
+}
+
+function sendAppJson(res, payload, status = 200) {
+  const body = JSON.stringify(payload, null, 2);
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  res.end(body);
+}
+
+function sendAppHtml(res, html, status = 200) {
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  res.end(html);
+}
+
+function appHtml() {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fantasy Baseball Control Room</title>
+  <style>
+    :root {
+      --bg: #f4f2ec;
+      --panel: #fffdf7;
+      --ink: #1d261e;
+      --muted: #687063;
+      --line: #d9d4c7;
+      --green: #5a9b50;
+      --brown: #9a6a16;
+      --blue: #617dff;
+      --red: #a84532;
+      --shadow: 0 18px 40px rgba(60, 48, 24, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, rgba(90,155,80,0.16), transparent 32rem),
+        linear-gradient(135deg, #f8f7f2, var(--bg));
+      color: var(--ink);
+      font-family: "Avenir Next", "Trebuchet MS", Verdana, sans-serif;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 28px 18px 48px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: end; margin-bottom: 18px; }
+    h1 { margin: 0 0 6px; font-size: clamp(26px, 4vw, 44px); letter-spacing: -0.04em; color: var(--green); }
+    .meta { color: var(--muted); font-size: 14px; }
+    .refresh { border: 1px solid var(--line); background: var(--panel); color: var(--brown); border-radius: 999px; padding: 9px 14px; font-weight: 700; cursor: pointer; }
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 18px; }
+    .tab { border: 1px solid var(--line); background: rgba(255,255,255,0.7); color: var(--muted); border-radius: 999px; padding: 10px 14px; cursor: pointer; font-weight: 700; }
+    .tab.active { background: var(--ink); color: white; border-color: var(--ink); }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
+    .card { grid-column: span 12; background: rgba(255,253,247,0.92); border: 1px solid var(--line); border-radius: 18px; padding: 16px; box-shadow: var(--shadow); }
+    @media (min-width: 760px) { .half { grid-column: span 6; } .third { grid-column: span 4; } .two { grid-column: span 8; } }
+    h2 { margin: 0 0 10px; font-size: 18px; color: var(--brown); }
+    h3 { margin: 0 0 6px; font-size: 15px; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { padding: 6px 0; border-top: 1px solid rgba(217,212,199,0.65); }
+    li:first-child { border-top: 0; }
+    .big { font-size: 28px; font-weight: 800; color: var(--green); }
+    .pill { display: inline-block; color: white; background: var(--green); border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 800; margin-right: 6px; }
+    .pill.start { background: var(--blue); }
+    .pill.drop { background: var(--red); }
+    .sub { color: var(--muted); font-size: 13px; line-height: 1.35; }
+    .empty { color: var(--muted); font-style: italic; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid rgba(217,212,199,0.8); vertical-align: top; }
+    th { color: var(--brown); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .hidden { display: none; }
+    .chart { width: 100%; height: 220px; border: 1px dashed var(--line); border-radius: 14px; background: rgba(255,255,255,0.46); }
+    .mono { font-family: Menlo, Monaco, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Fantasy Control Room</h1>
+        <div class="meta" id="top-meta">Loading SQLite-backed dashboard...</div>
+      </div>
+      <button class="refresh" id="refresh">Refresh</button>
+    </header>
+    <nav class="tabs">
+      <button class="tab active" data-tab="today">Today</button>
+      <button class="tab" data-tab="review">Review</button>
+      <button class="tab" data-tab="lineup">Lineup</button>
+      <button class="tab" data-tab="trends">Trends</button>
+      <button class="tab" data-tab="history">History</button>
+    </nav>
+
+    <section id="today" class="page grid"></section>
+    <section id="review" class="page grid hidden"></section>
+    <section id="lineup" class="page grid hidden"></section>
+    <section id="trends" class="page grid hidden"></section>
+    <section id="history" class="page grid hidden"></section>
+  </main>
+  <script>
+    const state = {};
+    const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    async function getJson(path) {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(path + " failed: " + res.status);
+      return res.json();
+    }
+    function fmt(value, digits = 1) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "n/a";
+      return Number.isInteger(n) ? String(n) : n.toFixed(digits);
+    }
+    function actionLabel(row) {
+      return String(row.type || "").replace("addBatting", "ADD").replace("addPitching", "ADD").replace("add", "ADD").replace("start", "START").replace("drop", "DROP").toUpperCase();
+    }
+    function actionClass(label) {
+      if (label === "START") return "start";
+      if (label === "DROP") return "drop";
+      return "";
+    }
+    function actionSub(row) {
+      const d = row.detail || {};
+      const bits = [];
+      if (d.pairedDrop) bits.push("drop " + d.pairedDrop);
+      if (d.startSlot) bits.push("start at " + d.startSlot);
+      if (d.benchName) bits.push("bench " + d.benchName + (d.benchSlot ? " (" + d.benchSlot + ")" : ""));
+      if (d.targetCategories && d.targetCategories.length) bits.push("targets " + d.targetCategories.join(", "));
+      if (d.confidence) bits.push("confidence " + d.confidence);
+      return bits.join(" · ");
+    }
+    function renderToday() {
+      const s = state.latest.summary || {};
+      const cats = s.categories || {};
+      const actions = state.latest.recommendations || [];
+      const targetItems = (s.targets || []).map((key) => {
+        const c = cats[key] || { name: key };
+        return "<li><strong>" + esc(key) + "</strong> <span class='sub'>" + esc(c.name) + " · points " + esc(fmt(c.points)) + " · rank " + esc(fmt(c.rank, 0)) + "</span></li>";
+      }).join("") || "<li class='empty'>No target categories stored yet.</li>";
+      const actionItems = actions.map((row) => {
+        const label = actionLabel(row);
+        return "<li><span class='pill " + actionClass(label) + "'>" + esc(label) + "</span><strong>" + esc(row.playerName || row.detail?.playerName || "Unknown") + "</strong><div class='sub'>" + esc(actionSub(row) || row.detail?.why || "") + "</div></li>";
+      }).join("") || "<li class='empty'>No recommendations yet. Run node cli.js recommend.</li>";
+      document.querySelector("#today").innerHTML =
+        "<article class='card third'><h2>Rank</h2><div class='big'>" + esc(s.overallRank ?? "n/a") + "</div><div class='sub'>Season " + esc(fmt((s.seasonProgress || 0) * 100, 0)) + "% · IP " + esc(fmt(s.ipValue, 1)) + "/" + esc(s.ipCap ?? "n/a") + "</div></article>" +
+        "<article class='card third'><h2>Points To Next</h2><div class='big'>" + esc(s.pointsToNextTeam?.delta ? "+" + fmt(s.pointsToNextTeam.delta, 1) : "n/a") + "</div><div class='sub'>" + esc(s.pointsToNextTeam?.nextTeamName || "No team gap stored") + "</div></article>" +
+        "<article class='card third'><h2>Total Points</h2><div class='big'>" + esc(fmt(s.totalPoints, 1)) + "</div><div class='sub'>Across roto categories</div></article>" +
+        "<article class='card half'><h2>Targets</h2><ul>" + targetItems + "</ul></article>" +
+        "<article class='card half'><h2>Actions</h2><ul>" + actionItems + "</ul></article>";
+    }
+    function renderReview() {
+      const rows = state.latest.recommendations || [];
+      const cards = rows.map((row) => {
+        const label = actionLabel(row);
+        const why = row.detail?.why || "No explanation stored.";
+        return "<article class='card half'><span class='pill " + actionClass(label) + "'>" + esc(label) + "</span><h2>" + esc(row.playerName || row.detail?.playerName || "Unknown") + "</h2><div class='sub'>" + esc(actionSub(row)) + "</div><p>" + esc(why) + "</p></article>";
+      }).join("") || "<article class='card'><p class='empty'>No decision details available.</p></article>";
+      document.querySelector("#review").innerHTML = cards;
+    }
+    function lineupTable(title, rows) {
+      const body = (rows || []).map((p) => "<tr><td class='mono'>" + esc(p.slot) + "</td><td>" + esc(p.name) + "</td><td>" + esc((p.positions || []).join(", ")) + "</td><td>" + esc(p.status || "") + "</td></tr>").join("") || "<tr><td colspan='4' class='empty'>None</td></tr>";
+      return "<article class='card half'><h2>" + esc(title) + "</h2><table><thead><tr><th>Slot</th><th>Player</th><th>Eligible</th><th>Status</th></tr></thead><tbody>" + body + "</tbody></table></article>";
+    }
+    function renderLineup() {
+      const l = state.lineup.lineup || {};
+      document.querySelector("#lineup").innerHTML =
+        lineupTable("Active", l.active) + lineupTable("Bench", l.bench) + lineupTable("IL", l.il) + lineupTable("Other", l.other);
+    }
+    function drawChart(points, key) {
+      if (!points.length) return "<div class='chart'></div>";
+      const width = 760, height = 220, pad = 24;
+      const vals = points.map((p) => Number(p[key])).filter(Number.isFinite);
+      if (!vals.length) return "<div class='chart'></div>";
+      const min = Math.min(...vals), max = Math.max(...vals);
+      const span = max - min || 1;
+      const line = points.map((p, i) => {
+        const x = pad + (i * (width - pad * 2)) / Math.max(points.length - 1, 1);
+        const y = height - pad - ((Number(p[key]) - min) / span) * (height - pad * 2);
+        return (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
+      }).join(" ");
+      return "<svg class='chart' viewBox='0 0 " + width + " " + height + "'><path d='" + line + "' fill='none' stroke='#5a9b50' stroke-width='4' stroke-linecap='round'/><text x='18' y='24' fill='#687063' font-size='13'>" + esc(key) + ": " + esc(fmt(vals[vals.length - 1], 1)) + "</text></svg>";
+    }
+    function renderTrends() {
+      const rows = state.snapshots.snapshots || [];
+      document.querySelector("#trends").innerHTML =
+        "<article class='card half'><h2>Rank Trend</h2>" + drawChart(rows, "overallRank") + "</article>" +
+        "<article class='card half'><h2>Points Trend</h2>" + drawChart(rows, "totalPoints") + "</article>" +
+        "<article class='card'><h2>Effectiveness</h2><ul>" + ((state.effectiveness.latestSummary || []).map((line) => "<li>" + esc(line.replace(/^- /, "")) + "</li>").join("") || "<li class='empty'>No prior daily comparison yet.</li>") + "</ul></article>";
+    }
+    function renderHistory() {
+      const rows = (state.snapshots.snapshots || []).slice(-30).reverse();
+      const body = rows.map((s) => "<tr><td>" + esc(s.date) + "</td><td>" + esc(s.overallRank ?? "") + "</td><td>" + esc(fmt(s.totalPoints, 1)) + "</td><td>" + esc(s.pointsToNextTeam?.delta ? "+" + fmt(s.pointsToNextTeam.delta, 1) : "") + "</td><td>" + esc((s.targets || []).join(", ")) + "</td></tr>").join("");
+      document.querySelector("#history").innerHTML =
+        "<article class='card'><h2>Snapshot History</h2><table><thead><tr><th>Date</th><th>Rank</th><th>Points</th><th>Next Team</th><th>Targets</th></tr></thead><tbody>" + body + "</tbody></table></article>";
+    }
+    function renderAll() {
+      const s = state.latest.summary || {};
+      document.querySelector("#top-meta").textContent = (s.leagueName || "League") + " | " + (s.teamName || "Team") + " | " + (s.date || "") + " | SQLite API";
+      renderToday(); renderReview(); renderLineup(); renderTrends(); renderHistory();
+    }
+    async function loadAll() {
+      [state.latest, state.snapshots, state.lineup, state.effectiveness] = await Promise.all([
+        getJson("/api/latest"),
+        getJson("/api/snapshots?limit=90&daily=1"),
+        getJson("/api/lineup"),
+        getJson("/api/effectiveness"),
+      ]);
+      renderAll();
+    }
+    document.querySelectorAll(".tab").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".page").forEach((p) => p.classList.add("hidden"));
+        button.classList.add("active");
+        document.querySelector("#" + button.dataset.tab).classList.remove("hidden");
+      });
+    });
+    document.querySelector("#refresh").addEventListener("click", loadAll);
+    loadAll().catch((error) => {
+      document.querySelector("#today").innerHTML = "<article class='card'><h2>Load Error</h2><p>" + esc(error.message) + "</p></article>";
+    });
+  </script>
+</body>
+</html>`;
+}
+
+async function app() {
+  const port = parseAppPort(getArgValue("--port") || process.env.FANTASY_APP_PORT, 8787);
+  const host = "127.0.0.1";
+  const server = http.createServer((req, res) => {
+    (async () => {
+      const url = new URL(req.url || "/", `http://${host}:${port}`);
+      if (url.pathname === "/" || url.pathname === "/app") {
+        sendAppHtml(res, appHtml());
+        return;
+      }
+      if (url.pathname === "/api/health") {
+        sendAppJson(res, { ok: true, dbPath: DB_PATH, timestamp: new Date().toISOString() });
+        return;
+      }
+      if (url.pathname === "/api/latest") {
+        sendAppJson(res, await appLatestPayload());
+        return;
+      }
+      if (url.pathname === "/api/snapshots") {
+        sendAppJson(res, await appSnapshotsPayload(url));
+        return;
+      }
+      if (url.pathname === "/api/recommendations") {
+        sendAppJson(res, await appRecommendationsPayload(url));
+        return;
+      }
+      if (url.pathname === "/api/lineup") {
+        sendAppJson(res, await appLineupPayload());
+        return;
+      }
+      if (url.pathname === "/api/effectiveness") {
+        sendAppJson(res, await appEffectivenessPayload());
+        return;
+      }
+      sendAppJson(res, { error: "Not found" }, 404);
+    })().catch((error) => {
+      sendAppJson(res, { error: error.message }, 500);
+    });
+  });
+
+  server.listen(port, host, () => {
+    const url = `http://${host}:${port}`;
+    console.log(`Fantasy app: ${url}`);
+    console.log("API: /api/latest /api/snapshots /api/recommendations /api/lineup /api/effectiveness");
+    if (shouldOpenDashboard()) openDashboardFile(url);
+  });
+}
+
 async function finalizeAndLogRun({
   config,
   overallRank,
@@ -4586,6 +5076,8 @@ async function main() {
       await discover();
     } else if (command === "dashboard") {
       await dashboard();
+    } else if (command === "app") {
+      await app();
     } else if (command === "db-backfill") {
       await backfillDb();
     } else if (command === "review") {
@@ -4598,7 +5090,7 @@ async function main() {
       await lineup();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|db-backfill|log|recommend|review|snapshot|lineup> [--top N] [--position C] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|app|db-backfill|log|recommend|review|snapshot|lineup> [--top N] [--position C] [--port 8787] [--verbose]"
       );
     }
   } catch (error) {

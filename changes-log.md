@@ -7,6 +7,9 @@
 - Added explanation metadata to recommendations and persisted it in snapshots/SQLite.
 - Updated dashboard generation to read from SQLite first with JSONL fallback.
 - Added `review` command to generate a local decision review screen for the latest recommendation.
+- Added `app` command for a local browser app at `http://127.0.0.1:8787`.
+- Added local API endpoints for latest snapshot, snapshots, recommendations, lineup, and effectiveness.
+- Added tabbed app interface: Today, Review, Lineup, Trends, and History.
 
 ## 2026-04-24
 - Added `snapshot` command to log standings/roster snapshots without generating recommendations.

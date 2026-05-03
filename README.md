@@ -56,7 +56,29 @@ Open the decision review page for the latest recommendation.
 node cli.js review --open-dashboard
 ```
 
-7. Publish the dashboard to GitHub Pages output (writes `docs/index.html`).
+7. Run the local app.
+
+```bash
+node cli.js app
+```
+
+Then open `http://127.0.0.1:8787`. The app has Today, Review, Lineup, Trends, and History tabs backed by local SQLite API endpoints:
+
+```text
+/api/latest
+/api/snapshots
+/api/recommendations
+/api/lineup
+/api/effectiveness
+```
+
+Use a custom port if needed:
+
+```bash
+node cli.js app --port 8790
+```
+
+8. Publish the dashboard to GitHub Pages output (writes `docs/index.html`).
 
 ```bash
 node cli.js dashboard --publish
