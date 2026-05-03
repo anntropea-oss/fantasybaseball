@@ -16,6 +16,7 @@
 - Effectiveness/adherence now compares against the most recent snapshot from a different date (avoids false 0/3 when running `recommend` multiple times in one day).
 - Added `lineup` command to print today + tomorrow lineup slots directly from Yahoo (debugging lineup/adherence issues).
 - Added `lineup --date` and `lineup --players` filters for checking specific recommendation/adherence dates.
+- Added a START-section warning that Yahoo Start Active Players can overwrite manual swaps.
 
 ## 2026-04-03
 - Excluded IL players from START recommendations.

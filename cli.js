@@ -3749,6 +3749,9 @@ async function recommend({ snapshotOnly = false } = {}) {
       );
       actionSuggestions.start.push(plan.name);
     });
+    console.log(
+      fmtLine("Note: apply these swaps manually after Yahoo Start Active Players, or Yahoo may overwrite them.")
+    );
   } else if (startMessage) {
     printActionsHeader();
     console.log(fmtLine(startMessage));
