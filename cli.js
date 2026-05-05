@@ -1142,14 +1142,176 @@ function buildRosterState(rosterPlayers) {
       if (!playerKey) return null;
       const name = extractPlayerName(player);
       const selected = extractSelectedPositions(player);
+      const positions = extractPlayerPositions(player);
+      const status = extractPlayerStatus(player);
       return {
         playerKey,
         name,
         selected,
         selectedPrimary: extractPrimarySelectedPosition(selected),
+        positions,
+        status,
+        isPitcher: isPitcherPositions(positions),
+        isIL: isILPosition(selected) || isILStatus(status),
       };
     })
     .filter(Boolean);
+}
+
+function countBy(items, getKey) {
+  const out = {};
+  (items || []).forEach((item) => {
+    const key = getKey(item);
+    if (!key) return;
+    out[key] = (out[key] || 0) + 1;
+  });
+  return out;
+}
+
+function buildSnapshotFeatures({
+  leagueSettingsFile,
+  resolvedCategories,
+  focusKeys,
+  pointInfoByKey,
+  categoryNextGaps,
+  rosterMappedPlayers,
+  startPlans,
+  actionSuggestions,
+  actionDetails,
+  dropSuggestions,
+  addCandidates,
+}) {
+  const roster = Array.isArray(rosterMappedPlayers) ? rosterMappedPlayers : [];
+  const actions = actionSuggestions || {};
+  const details = actionDetails || {};
+  const rosterSlot = (p) => p.selectedPrimary || extractPrimarySelectedPosition(p.selected) || "UNK";
+  const rosterBySlot = countBy(roster, rosterSlot);
+  const rosterByStatus = countBy(roster, (p) => p.status || "ACTIVE");
+  const active = roster.filter((p) => !isBenchPosition(p.selected || []) && !p.isIL);
+  const bench = roster.filter((p) => isBenchPosition(p.selected || []));
+  const unavailable = roster.filter((p) => p.isIL || isUnavailableStatus(p.status));
+  const pitchers = roster.filter((p) => p.isPitcher);
+  const hitters = roster.filter((p) => !p.isPitcher);
+  const projectedAdds = [
+    ...(details.addBatting || []),
+    ...(details.addPitching || []),
+    ...(details.add || []),
+  ];
+  const addPool = Array.isArray(addCandidates) ? addCandidates : [];
+
+  const categoryState = {};
+  (resolvedCategories || []).forEach((cat) => {
+    const pointInfo = pointInfoByKey?.get?.(cat.key) || null;
+    const gap = categoryNextGaps?.[cat.key] || null;
+    categoryState[cat.key] = {
+      points: toNumber(cat.points),
+      rank: toNumber(cat.rank),
+      value: toNumber(cat.value),
+      focus: Array.isArray(focusKeys) ? focusKeys.includes(cat.key) : false,
+      nextGap: gap
+        ? {
+            deltaToNext: toNumber(gap.deltaToNext),
+            pointsGainToNext: toNumber(gap.pointsGainToNext),
+            status: gap.status || null,
+          }
+        : null,
+      pointInfo: pointInfo
+        ? {
+            pointsGain: toNumber(pointInfo.pointsGain),
+            deltaToNext: toNumber(pointInfo.deltaToNext),
+            nextTeamKey: pointInfo.nextTeamKey || null,
+            nextTeamName: pointInfo.nextTeamName || null,
+          }
+        : null,
+    };
+  });
+
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    sources: {
+      yahooRoster: roster.length > 0,
+      yahooPlayerRanks: roster.some((p) => p.rank !== null && p.rank !== undefined),
+      yahooPlayerStats: roster.some((p) => p.stats && p.stats.size > 0),
+      externalSchedule: false,
+      externalProjections: false,
+      externalNews: false,
+    },
+    categoryState,
+    rosterComposition: {
+      total: roster.length,
+      active: active.length,
+      bench: bench.length,
+      il: roster.filter((p) => p.isIL).length,
+      unavailable: unavailable.length,
+      pitchers: pitchers.length,
+      hitters: hitters.length,
+      bySlot: rosterBySlot,
+      byStatus: rosterByStatus,
+    },
+    playerAvailability: unavailable.map((p) => ({
+      playerKey: p.playerKey || null,
+      name: p.name,
+      status: p.status || null,
+      selectedPrimary: p.selectedPrimary || null,
+      positions: p.positions || [],
+    })),
+    scheduleProxy: {
+      source: "lineup-slots",
+      rosterChanges: leagueSettingsFile?.rosterChanges || null,
+      activePitchers: active
+        .filter((p) => p.isPitcher)
+        .map((p) => ({
+          playerKey: p.playerKey || null,
+          name: p.name,
+          slot: rosterSlot(p),
+          positions: p.positions || [],
+          status: p.status || null,
+        })),
+      recommendedStarts: (startPlans || []).map((p) => ({
+        playerKey: p.playerKey || null,
+        name: p.name,
+        startSlot: p.startSlot || null,
+        benchName: p.benchName || null,
+        benchSlot: p.benchSlot || null,
+      })),
+    },
+    recommendationContext: {
+      counts: {
+        addBatting: actions.addBatting?.length || 0,
+        addPitching: actions.addPitching?.length || 0,
+        add: actions.add?.length || 0,
+        start: actions.start?.length || 0,
+        drop: actions.drop?.length || 0,
+      },
+      candidatePool: {
+        adds: addPool.length,
+        drops: Array.isArray(dropSuggestions) ? dropSuggestions.length : 0,
+        projectedAdds: projectedAdds.length,
+        archetypeTaggedAdds: projectedAdds.filter((d) => d.archetype).length,
+      },
+      addDetails: projectedAdds.map((d) => ({
+        playerKey: d.playerKey || null,
+        playerName: d.playerName || null,
+        positions: d.positions || [],
+        targetCategories: d.targetCategories || [],
+        pairedDrop: d.pairedDrop || null,
+        archetype: d.archetype || null,
+        archetypeFitScore: toNumber(d.archetypeFitScore),
+        statsScore: toNumber(d.statsScore),
+        yahooRank: toNumber(d.yahooRank),
+      })),
+      dropDetails: (details.drop || []).map((d) => ({
+        playerKey: d.playerKey || null,
+        playerName: d.playerName || null,
+        positions: d.positions || [],
+        status: d.status || null,
+        statusDrop: !!d.statusDrop,
+        statsScore: toNumber(d.statsScore),
+        yahooRank: toNumber(d.yahooRank),
+      })),
+    },
+  };
 }
 
 function isBenchSelectedPositions(selected) {
@@ -1571,6 +1733,7 @@ function buildSnapshot({
   actionSuggestions,
   actionDetails,
   rosterState,
+  featureInputs,
 }) {
   const snapshotId = new Date().toISOString();
   const categories = resolvedCategories.map((cat) => ({
@@ -1605,6 +1768,7 @@ function buildSnapshot({
     actions: actionSuggestions,
     actionDetails: actionDetails || {},
     roster: rosterState || [],
+    featureInputs: featureInputs || null,
   };
 }
 
@@ -3453,6 +3617,19 @@ async function recommend({ snapshotOnly = false } = {}) {
 
     console.log(cYellow("Actions: snapshot-only (no recommendations computed)."));
     console.log("");
+    const featureInputs = buildSnapshotFeatures({
+      leagueSettingsFile,
+      resolvedCategories,
+      focusKeys,
+      pointInfoByKey,
+      categoryNextGaps,
+      rosterMappedPlayers,
+      startPlans: [],
+      actionSuggestions,
+      actionDetails,
+      dropSuggestions: [],
+      addCandidates: [],
+    });
     await finalizeAndLogRun({
       config,
       overallRank,
@@ -3471,6 +3648,7 @@ async function recommend({ snapshotOnly = false } = {}) {
       actionDetails,
       rosterState,
       learning,
+      featureInputs,
     });
     return;
   }
@@ -4418,6 +4596,20 @@ async function recommend({ snapshotOnly = false } = {}) {
     console.log("");
   }
 
+  const featureInputs = buildSnapshotFeatures({
+    leagueSettingsFile,
+    resolvedCategories,
+    focusKeys,
+    pointInfoByKey,
+    categoryNextGaps,
+    rosterMappedPlayers,
+    startPlans,
+    actionSuggestions,
+    actionDetails,
+    dropSuggestions,
+    addCandidates: allAddCandidates,
+  });
+
   await finalizeAndLogRun({
     config,
     overallRank,
@@ -4436,6 +4628,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     actionDetails,
     rosterState,
     learning,
+    featureInputs,
   });
 }
 
@@ -5202,6 +5395,7 @@ async function finalizeAndLogRun({
   actionDetails,
   rosterState,
   learning,
+  featureInputs,
 }) {
   const snapshot = buildSnapshot({
     config,
@@ -5220,6 +5414,7 @@ async function finalizeAndLogRun({
     actionSuggestions,
     actionDetails,
     rosterState,
+    featureInputs,
   });
 
   const snapshotsBefore = readJsonl(SNAPSHOT_LOG);

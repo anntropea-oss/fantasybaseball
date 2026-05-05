@@ -100,6 +100,11 @@ stored in `logs/model-benchmark-history.jsonl`.
 - If you play multiple leagues, `discover` will list them and pick the first. You can edit `leagueKey` and `teamKey` in `config.json` after discovery.
 - SQLite data is stored locally at `logs/fantasy.db`; JSONL logs are still written as a backup/export path.
 - The dashboard reads from `logs/fantasy.db` first, then falls back to `logs/snapshots.jsonl`.
+- Snapshots include a versioned `featureInputs` block for future model training:
+  category gaps, roster composition, player availability/status, lineup-slot
+  schedule proxies, recommendation counts, add/drop context, archetypes, and
+  projection-score coverage. External schedule/projection/news fields are
+  explicitly marked as unavailable until a data feed is added.
 - For recurring runs, you can call `scripts/run-daily.sh` from cron/launchd.
 
 ## Branch Helpers

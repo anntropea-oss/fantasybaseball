@@ -180,6 +180,12 @@ function gapFeatures(snapshot, key) {
 
 function buildRowFeatures(snapshots, index, key, categoryKeys) {
   const s = snapshots[index];
+  const fi = s.featureInputs || {};
+  const rc = fi.rosterComposition || {};
+  const rec = fi.recommendationContext || {};
+  const recCounts = rec.counts || {};
+  const candidatePool = rec.candidatePool || {};
+  const featureCategory = fi.categoryState?.[key] || {};
   const cats = categoryMap(s);
   const c = cats.get(key) || { points: 0, rank: 0, value: 0 };
   const season = toNumber(s.seasonProgress) ?? 0;
@@ -217,6 +223,26 @@ function buildRowFeatures(snapshots, index, key, categoryKeys) {
     roster.il,
     roster.pitcher,
     roster.hitter,
+    toNumber(rc.total) ?? 0,
+    toNumber(rc.active) ?? 0,
+    toNumber(rc.bench) ?? 0,
+    toNumber(rc.il) ?? 0,
+    toNumber(rc.unavailable) ?? 0,
+    toNumber(rc.pitchers) ?? 0,
+    toNumber(rc.hitters) ?? 0,
+    toNumber(recCounts.addBatting) ?? 0,
+    toNumber(recCounts.addPitching) ?? 0,
+    toNumber(recCounts.add) ?? 0,
+    toNumber(recCounts.start) ?? 0,
+    toNumber(recCounts.drop) ?? 0,
+    toNumber(candidatePool.adds) ?? 0,
+    toNumber(candidatePool.drops) ?? 0,
+    toNumber(candidatePool.projectedAdds) ?? 0,
+    toNumber(candidatePool.archetypeTaggedAdds) ?? 0,
+    featureCategory.focus ? 1 : 0,
+    toNumber(featureCategory.nextGap?.deltaToNext) ?? 0,
+    toNumber(featureCategory.nextGap?.pointsGainToNext) ?? 0,
+    featureCategory.nextGap?.status === "chasing" ? 1 : 0,
     ...gapFeatures(s, key),
   ];
 
