@@ -20,6 +20,15 @@ const ACTION_LOG = path.join(LOG_DIR, "actions.jsonl");
 const DAILY_LOG = path.join(LOG_DIR, "daily-log.md");
 const LEARNING_PATH = path.join(LOG_DIR, "learning.json");
 const DB_PATH = path.join(LOG_DIR, "fantasy.db");
+const MODEL_BENCHMARK_HISTORY_LOG = path.join(LOG_DIR, "model-benchmark-history.jsonl");
+const MODEL_BENCHMARK_DAILY_REPORT = path.join(
+  LOG_DIR,
+  "model-benchmark-deep-daily-top3-train10.json"
+);
+const MODEL_BENCHMARK_ALL_REPORT = path.join(
+  LOG_DIR,
+  "model-benchmark-deep-all-top3-train20.json"
+);
 const DROP_RANK_FLOOR = 120;
 const DROP_RANK_FLOOR_SECONDARY = 80;
 const ADD_RANK_IMPROVEMENT = 30;
@@ -144,6 +153,113 @@ function generateDashboardTo(outPath = null) {
   }
 }
 
+function readJsonFileSafe(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function benchmarkMethodRows(report) {
+  return Object.entries(report?.methods || {})
+    .filter(([method]) => !["baseline", "oracle"].includes(method))
+    .map(([method, metrics]) => ({
+      method,
+      meanGain: toNumber(metrics.meanGain) ?? 0,
+      meanRegret: toNumber(metrics.meanRegret) ?? 0,
+      deltaMeanGainVsBaseline: toNumber(metrics.deltaMeanGainVsBaseline) ?? 0,
+      deltaRegretVsBaseline: toNumber(metrics.deltaRegretVsBaseline) ?? 0,
+      n: toNumber(metrics.n) ?? 0,
+    }));
+}
+
+function benchmarkBestChallenger(report) {
+  const rows = benchmarkMethodRows(report).sort(
+    (a, b) => b.deltaMeanGainVsBaseline - a.deltaMeanGainVsBaseline
+  );
+  return rows[0] || null;
+}
+
+function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
+  if (!dailyReport || !allReport || !method) return false;
+  const daily = dailyReport.methods?.[method] || null;
+  const allRuns = allReport.methods?.[method] || null;
+  if (!daily || !allRuns) return false;
+  const dailyDelta = toNumber(daily.deltaMeanGainVsBaseline) ?? -Infinity;
+  const allDelta = toNumber(allRuns.deltaMeanGainVsBaseline) ?? -Infinity;
+  const dailyN = toNumber(daily.n) ?? 0;
+  const dailyRegretDelta = toNumber(daily.deltaRegretVsBaseline) ?? -Infinity;
+  const allRegretDelta = toNumber(allRuns.deltaRegretVsBaseline) ?? -Infinity;
+  return (
+    dailyDelta > 0.15 &&
+    allDelta > 0.05 &&
+    dailyN >= 20 &&
+    dailyRegretDelta >= 0 &&
+    allRegretDelta >= 0
+  );
+}
+
+function formatSigned(value, digits = 3) {
+  const n = toNumber(value) ?? 0;
+  return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}`;
+}
+
+function benchmarkModelStatusLines() {
+  const daily = readJsonFileSafe(MODEL_BENCHMARK_DAILY_REPORT);
+  const allRuns = readJsonFileSafe(MODEL_BENCHMARK_ALL_REPORT);
+  if (!daily && !allRuns) {
+    return ["Champion: current heuristic (benchmark not run yet; use `node cli.js benchmark`)."];
+  }
+
+  const dailyBaseline = daily?.methods?.baseline || null;
+  const dailyOracle = daily?.methods?.oracle || null;
+  const allBaseline = allRuns?.methods?.baseline || null;
+  const best = benchmarkBestChallenger(daily);
+  const promoted = best
+    ? benchmarkQualifiesAsChampion(daily, allRuns, best.method)
+    : false;
+  const lines = [];
+
+  lines.push(
+    promoted
+      ? `Champion review: ${best.method} qualifies as a challenger promotion candidate.`
+      : "Champion: current heuristic remains production default."
+  );
+  if (dailyBaseline) {
+    lines.push(
+      `Daily top-3 baseline mean gain ${formatSigned(dailyBaseline.meanGain)}; regret ${
+        (toNumber(dailyBaseline.meanRegret) ?? 0).toFixed(3)
+      } vs oracle.`
+    );
+  }
+  if (dailyOracle && dailyBaseline) {
+    const oracleGap =
+      (toNumber(dailyOracle.meanGain) ?? 0) - (toNumber(dailyBaseline.meanGain) ?? 0);
+    lines.push(`Oracle gap: ${formatSigned(oracleGap)} category points per evaluated snapshot.`);
+  }
+  if (best) {
+    const allDelta = allRuns?.methods?.[best.method]?.deltaMeanGainVsBaseline;
+    const allText = allDelta !== undefined ? `, all-runs ${formatSigned(allDelta)}` : "";
+    lines.push(
+      `Closest challenger: ${best.method} daily ${formatSigned(
+        best.deltaMeanGainVsBaseline
+      )}${allText} vs baseline.`
+    );
+  }
+  if (allBaseline) {
+    lines.push(`All-runs sensitivity baseline mean gain ${formatSigned(allBaseline.meanGain)}.`);
+  }
+  return lines;
+}
+
+function printModelStatus() {
+  console.log(cYellow("Model check:"));
+  benchmarkModelStatusLines().forEach((line) => console.log(fmtBullet(line)));
+  console.log("");
+}
+
 function shouldOpenDashboard() {
   if (process.argv.includes("--open-dashboard")) return true;
   if (process.argv.includes("--no-open-dashboard")) return false;
@@ -186,6 +302,99 @@ async function dashboard() {
     console.log("Open it with:");
     console.log(`open ${filePath}`);
   }
+}
+
+function runBenchmarkCommand(args, label) {
+  const scriptPath = path.join(__dirname, "scripts", "model-benchmark-deep.mjs");
+  console.log(cYellow(`Running ${label} benchmark...`));
+  execFileSync(process.execPath, [scriptPath, ...args], {
+    cwd: __dirname,
+    stdio: "inherit",
+  });
+}
+
+function appendBenchmarkHistoryEntry() {
+  const daily = readJsonFileSafe(MODEL_BENCHMARK_DAILY_REPORT);
+  const allRuns = readJsonFileSafe(MODEL_BENCHMARK_ALL_REPORT);
+  if (!daily && !allRuns) return;
+  const dailyBest = benchmarkBestChallenger(daily);
+  const allBest = benchmarkBestChallenger(allRuns);
+  appendJsonl(MODEL_BENCHMARK_HISTORY_LOG, {
+    id: new Date().toISOString(),
+    daily: daily
+      ? {
+          report: MODEL_BENCHMARK_DAILY_REPORT,
+          baseline: daily.methods?.baseline || null,
+          oracle: daily.methods?.oracle || null,
+          bestChallenger: dailyBest,
+        }
+      : null,
+    allRuns: allRuns
+      ? {
+          report: MODEL_BENCHMARK_ALL_REPORT,
+          baseline: allRuns.methods?.baseline || null,
+          oracle: allRuns.methods?.oracle || null,
+          bestChallenger: allBest,
+        }
+      : null,
+    promotionCandidate:
+      dailyBest && benchmarkQualifiesAsChampion(daily, allRuns, dailyBest.method)
+        ? dailyBest.method
+        : null,
+  });
+}
+
+async function benchmark() {
+  const dailyOnly = process.argv.includes("--daily-only");
+  const allRunsOnly = process.argv.includes("--all-runs-only");
+  if (!allRunsOnly) {
+    runBenchmarkCommand(
+      [
+        "--days",
+        "365",
+        "--daily",
+        "--top",
+        "3",
+        "--min-train",
+        "10",
+        "--knn-k",
+        "7",
+        "--pca-k",
+        "4",
+        "--trees",
+        "80",
+        "--max-depth",
+        "3",
+      ],
+      "daily champion/challenger"
+    );
+  }
+  if (!dailyOnly) {
+    runBenchmarkCommand(
+      [
+        "--days",
+        "365",
+        "--all-runs",
+        "--top",
+        "3",
+        "--min-train",
+        "20",
+        "--knn-k",
+        "9",
+        "--pca-k",
+        "5",
+        "--trees",
+        "80",
+        "--max-depth",
+        "3",
+      ],
+      "all-runs sensitivity"
+    );
+  }
+  appendBenchmarkHistoryEntry();
+  console.log("");
+  printModelStatus();
+  console.log(`Benchmark history: ${MODEL_BENCHMARK_HISTORY_LOG}`);
 }
 
 function ensureLogDir() {
@@ -2997,6 +3206,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     }
   }
   console.log("");
+  printModelStatus();
 
   let pointGainTargets = [];
   let bestValueTargets = [];
@@ -5076,6 +5286,8 @@ async function main() {
       await discover();
     } else if (command === "dashboard") {
       await dashboard();
+    } else if (command === "benchmark") {
+      await benchmark();
     } else if (command === "app") {
       await app();
     } else if (command === "db-backfill") {
@@ -5090,7 +5302,7 @@ async function main() {
       await lineup();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|app|db-backfill|log|recommend|review|snapshot|lineup> [--top N] [--position C] [--port 8787] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|benchmark|app|db-backfill|log|recommend|review|snapshot|lineup> [--top N] [--position C] [--port 8787] [--verbose]"
       );
     }
   } catch (error) {

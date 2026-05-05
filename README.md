@@ -84,6 +84,16 @@ node cli.js app --port 8790
 node cli.js dashboard --publish
 ```
 
+9. Run the champion/challenger model benchmark.
+
+```bash
+node cli.js benchmark
+```
+
+This keeps the current heuristic as the production champion unless a challenger
+beats it across daily and all-runs walk-forward checks. Benchmark summaries are
+stored in `logs/model-benchmark-history.jsonl`.
+
 ## Notes
 
 - The CLI stores OAuth tokens at `.tokens.json`.
