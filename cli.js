@@ -2010,15 +2010,28 @@ function buildEffectivenessSummary(snapshots, currentSnapshot) {
   }
   if (!prevSnapshot) return null;
 
+  let adherenceBaseSnapshot = prevSnapshot;
+  if (!Array.isArray(adherenceBaseSnapshot.actions?.start) || adherenceBaseSnapshot.actions.start.length === 0) {
+    for (let i = snapshots.length - 2; i >= 0; i -= 1) {
+      const s = snapshots[i];
+      if (!s || s.id === currentSnapshot.id) continue;
+      if (s.date && currentSnapshot.date && s.date === currentSnapshot.date) continue;
+      if (Array.isArray(s.actions?.start) && s.actions.start.length > 0) {
+        adherenceBaseSnapshot = s;
+        break;
+      }
+    }
+  }
+
   const lines = [];
-  const adherence = computeStartAdherence(prevSnapshot, currentSnapshot);
+  const adherence = computeStartAdherence(adherenceBaseSnapshot, currentSnapshot);
   if (adherence && adherence.recommendedCount > 0) {
     lines.push(
       `- Lineup adherence: ${adherence.matched}/${adherence.recommendedCount} recommended starts used`
     );
     if (adherence.matched < adherence.recommendedCount) {
-      const recommended = prevSnapshot.actions?.start || [];
-      const prevByName = new Map((prevSnapshot.roster || []).map((p) => [p.name, p]));
+      const recommended = adherenceBaseSnapshot.actions?.start || [];
+      const prevByName = new Map((adherenceBaseSnapshot.roster || []).map((p) => [p.name, p]));
       const currByName = new Map((currentSnapshot.roster || []).map((p) => [p.name, p]));
       recommended.slice(0, 5).forEach((name) => {
         const a = prevByName.get(name);
