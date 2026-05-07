@@ -549,6 +549,60 @@ async function getDb() {
         notes TEXT,
         raw_json TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS historical_player_pools (
+        season INTEGER NOT NULL,
+        game_key TEXT NOT NULL,
+        fetched_at TEXT,
+        player_count INTEGER,
+        page_count INTEGER,
+        raw_json TEXT,
+        PRIMARY KEY (season, game_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS historical_players (
+        season INTEGER NOT NULL,
+        game_key TEXT NOT NULL,
+        player_key TEXT NOT NULL,
+        player_id TEXT,
+        name TEXT,
+        positions_json TEXT,
+        status TEXT,
+        yahoo_rank REAL,
+        raw_json TEXT NOT NULL,
+        PRIMARY KEY (season, player_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS historical_player_stats (
+        season INTEGER NOT NULL,
+        game_key TEXT NOT NULL,
+        player_key TEXT NOT NULL,
+        stat_id TEXT NOT NULL,
+        value REAL,
+        raw_value TEXT,
+        PRIMARY KEY (season, player_key, stat_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS historical_leagues (
+        season INTEGER NOT NULL,
+        game_key TEXT NOT NULL,
+        league_key TEXT NOT NULL,
+        team_key TEXT,
+        fetched_at TEXT,
+        raw_json TEXT,
+        PRIMARY KEY (season, league_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS historical_team_category_stats (
+        season INTEGER NOT NULL,
+        league_key TEXT NOT NULL,
+        team_key TEXT NOT NULL,
+        team_name TEXT,
+        stat_id TEXT NOT NULL,
+        value REAL,
+        points REAL,
+        PRIMARY KEY (season, league_key, team_key, stat_id)
+      );
     `);
     return db;
   })();
@@ -1130,6 +1184,12 @@ function extractPlayerKey(player) {
   return typeof key === "string" ? key : null;
 }
 
+function extractPlayerId(player) {
+  const id = findFirstValueByKey(player, "player_id");
+  if (id === undefined || id === null) return null;
+  return id.toString();
+}
+
 function extractPrimarySelectedPosition(selected) {
   if (!selected || selected.length === 0) return null;
   return selected[0] || null;
@@ -1704,6 +1764,361 @@ async function fetchPlayerHistory({ accessToken, playerKeys, endSeasonYear, seas
     }
   }
   return byKey;
+}
+
+function getHistoryBackfillSeasons() {
+  const explicit = getArgValue("--seasons");
+  if (explicit) {
+    const seasons = explicit
+      .split(",")
+      .map((item) => Number(item.trim()))
+      .filter((year) => Number.isInteger(year) && year > 1900);
+    if (seasons.length > 0) return seasons;
+  }
+  const count = Math.max(1, Math.floor(Number(getArgValue("--years")) || 5));
+  const nowYear = new Date().getFullYear();
+  const lastComplete = process.argv.includes("--include-current") ? nowYear : nowYear - 1;
+  return Array.from({ length: count }, (_, idx) => lastComplete - idx).reverse();
+}
+
+function getHistoryPageLimit() {
+  const raw = getArgValue("--max-pages");
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function getHistoryPlayerLimit() {
+  const raw = getArgValue("--limit");
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function extractGameKeyForSeason(payload, season) {
+  const games = findAllValuesByKey(payload, "game");
+  for (const game of games) {
+    const gameSeason = findFirstValueByKey(game, "season");
+    const gameKey = findFirstValueByKey(game, "game_key");
+    if (String(gameSeason) === String(season) && gameKey) return String(gameKey);
+  }
+  const fallback = findFirstValueByKey(payload, "game_key");
+  return fallback ? String(fallback) : null;
+}
+
+async function fetchGameKeyForSeason({ accessToken, season, gameCode = "mlb" }) {
+  const data = await yahooRequest({
+    url: `${FANTASY_API_BASE}/games;game_codes=${gameCode};seasons=${season}?format=json`,
+    accessToken,
+  });
+  writeDebugJson(`historical-game-${season}`, data);
+  const gameKey = extractGameKeyForSeason(data, season);
+  if (!gameKey) throw new Error(`Could not find Yahoo game key for ${gameCode} ${season}`);
+  return { gameKey, raw: data };
+}
+
+async function fetchHistoricalPlayersPage({ accessToken, gameKey, start, count }) {
+  let data = null;
+  let statsByKey = new Map();
+  try {
+    data = await yahooRequest({
+      url: `${FANTASY_API_BASE}/game/${gameKey}/players;start=${start};count=${count}/stats;type=season?format=json`,
+      accessToken,
+    });
+  } catch {
+    data = await yahooRequest({
+      url: `${FANTASY_API_BASE}/game/${gameKey}/players;start=${start};count=${count}?format=json`,
+      accessToken,
+    });
+    const playerKeys = findAllValuesByKey(data, "player")
+      .map((player) => extractPlayerKey(player))
+      .filter(Boolean);
+    for (const playerKeyValue of playerKeys) {
+      try {
+        const statData = await yahooRequest({
+          url: `${FANTASY_API_BASE}/player/${playerKeyValue}/stats;type=season?format=json`,
+          accessToken,
+        });
+        const statPlayer = findAllValuesByKey(statData, "player").find(
+          (player) => extractPlayerKey(player) === playerKeyValue
+        );
+        const stats = extractPlayerStats(statPlayer);
+        if (stats.size > 0) statsByKey.set(playerKeyValue, stats);
+      } catch {
+        // Some old Yahoo player keys no longer resolve; keep bio row and skip stats.
+      }
+    }
+  }
+  writeDebugJson(`historical-players-${gameKey}-${start}`, data);
+  const players = findAllValuesByKey(data, "player")
+    .filter((player) => extractPlayerKey(player))
+    .filter((player, idx, arr) => {
+      const key = extractPlayerKey(player);
+      return arr.findIndex((candidate) => extractPlayerKey(candidate) === key) === idx;
+    });
+  return { data, players, statsByKey };
+}
+
+async function writeHistoricalPlayerPoolToDb({
+  season,
+  gameKey,
+  players,
+  statsByKey,
+  pageCount,
+  rawSummary,
+}) {
+  const db = await getDb();
+  const fetchedAt = new Date().toISOString();
+  db.exec("BEGIN;");
+  try {
+    runStmt(
+      db,
+      `INSERT OR REPLACE INTO historical_player_pools (
+        season, game_key, fetched_at, player_count, page_count, raw_json
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+      [season, gameKey, fetchedAt, players.length, pageCount, jsonText(rawSummary || {})]
+    );
+
+    runStmt(db, "DELETE FROM historical_players WHERE season = ? AND game_key = ?", [
+      season,
+      gameKey,
+    ]);
+    runStmt(db, "DELETE FROM historical_player_stats WHERE season = ? AND game_key = ?", [
+      season,
+      gameKey,
+    ]);
+
+    players.forEach((player) => {
+      const playerKeyValue = extractPlayerKey(player);
+      if (!playerKeyValue) return;
+      const stats = statsByKey?.get(playerKeyValue) || extractPlayerStats(player);
+      runStmt(
+        db,
+        `INSERT OR REPLACE INTO historical_players (
+          season, game_key, player_key, player_id, name, positions_json,
+          status, yahoo_rank, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          season,
+          gameKey,
+          playerKeyValue,
+          extractPlayerId(player),
+          extractPlayerName(player),
+          jsonText(extractPlayerPositions(player)),
+          extractPlayerStatus(player),
+          toNumber(extractPlayerRank(player)),
+          jsonText(player),
+        ]
+      );
+      stats.forEach((value, statId) => {
+        runStmt(
+          db,
+          `INSERT OR REPLACE INTO historical_player_stats (
+            season, game_key, player_key, stat_id, value, raw_value
+          ) VALUES (?, ?, ?, ?, ?, ?)`,
+          [season, gameKey, playerKeyValue, statId, toNumber(value), String(value)]
+        );
+      });
+    });
+
+    db.exec("COMMIT;");
+  } catch (error) {
+    db.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+async function backfillHistoricalPlayerSeason({ accessToken, season, gameKey }) {
+  const pageSize = 25;
+  const maxPages = getHistoryPageLimit();
+  const playerLimit = getHistoryPlayerLimit();
+  const playersByKey = new Map();
+  const statsByKey = new Map();
+  const rawSummary = { season, gameKey, pages: [] };
+  let pageCount = 0;
+  let consecutiveEmptyPages = 0;
+
+  for (let start = 0; ; start += pageSize) {
+    if (maxPages && pageCount >= maxPages) break;
+    if (playerLimit && playersByKey.size >= playerLimit) break;
+    let page = null;
+    try {
+      page = await fetchHistoricalPlayersPage({
+        accessToken,
+        gameKey,
+        start,
+        count: pageSize,
+      });
+    } catch (error) {
+      pageCount += 1;
+      rawSummary.pages.push({
+        start,
+        count: 0,
+        skipped: true,
+        error: error.message.slice(0, 240),
+      });
+      consecutiveEmptyPages += 1;
+      if (consecutiveEmptyPages >= 4) break;
+      continue;
+    }
+    const { data, players, statsByKey: pageStatsByKey } = page;
+    pageCount += 1;
+    rawSummary.pages.push({ start, count: players.length });
+    consecutiveEmptyPages = players.length === 0 ? consecutiveEmptyPages + 1 : 0;
+    players.forEach((player) => {
+      const key = extractPlayerKey(player);
+      if (key && (!playerLimit || playersByKey.size < playerLimit)) {
+        playersByKey.set(key, player);
+      }
+    });
+    pageStatsByKey.forEach((stats, key) => statsByKey.set(key, stats));
+    if (consecutiveEmptyPages >= 4) break;
+    if (players.length < pageSize) break;
+    const collectionCount = toNumber(findFirstValueByKey(data, "count"));
+    if (collectionCount !== null && players.length === 0) break;
+  }
+
+  const players = [...playersByKey.values()];
+  await writeHistoricalPlayerPoolToDb({
+    season,
+    gameKey,
+    players,
+    statsByKey,
+    pageCount,
+    rawSummary,
+  });
+  return { season, gameKey, playerCount: players.length, pageCount };
+}
+
+async function discoverHistoricalLeagues({ accessToken, gameKey }) {
+  try {
+    const data = await yahooRequest({
+      url: `${FANTASY_API_BASE}/users;use_login=1/games;game_keys=${gameKey}/leagues/teams?format=json`,
+      accessToken,
+    });
+    writeDebugJson(`historical-leagues-${gameKey}`, data);
+    return {
+      raw: data,
+      leagueKeys: [...new Set(findAllValuesByKey(data, "league_key"))],
+      teamKeys: [...new Set(findAllValuesByKey(data, "team_key"))],
+    };
+  } catch {
+    return { raw: null, leagueKeys: [], teamKeys: [] };
+  }
+}
+
+async function writeHistoricalLeagueToDb({ season, gameKey, leagueKey, teamKey, raw, standings }) {
+  const db = await getDb();
+  const fetchedAt = new Date().toISOString();
+  db.exec("BEGIN;");
+  try {
+    runStmt(
+      db,
+      `INSERT OR REPLACE INTO historical_leagues (
+        season, game_key, league_key, team_key, fetched_at, raw_json
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+      [season, gameKey, leagueKey, teamKey || null, fetchedAt, jsonText(raw || {})]
+    );
+    runStmt(
+      db,
+      "DELETE FROM historical_team_category_stats WHERE season = ? AND league_key = ?",
+      [season, leagueKey]
+    );
+    const teams = buildTeamMetrics(standings || {});
+    teams.forEach((team) => {
+      team.statsById.forEach((stat, statId) => {
+        const pointStat = team.pointsById.get(statId);
+        runStmt(
+          db,
+          `INSERT OR REPLACE INTO historical_team_category_stats (
+            season, league_key, team_key, team_name, stat_id, value, points
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            season,
+            leagueKey,
+            team.teamKey,
+            team.teamName || null,
+            statId,
+            toNumber(extractStatValue(stat)),
+            toNumber(extractStatValue(pointStat)),
+          ]
+        );
+      });
+    });
+    db.exec("COMMIT;");
+  } catch (error) {
+    db.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+async function backfillHistoricalLeagues({ accessToken, season, gameKey }) {
+  const discovered = await discoverHistoricalLeagues({ accessToken, gameKey });
+  const results = [];
+  for (const leagueKey of discovered.leagueKeys) {
+    try {
+      const standings = await yahooRequest({
+        url: `${FANTASY_API_BASE}/league/${leagueKey}/standings?format=json`,
+        accessToken,
+      });
+      writeDebugJson(`historical-standings-${season}-${leagueKey}`, standings);
+      await writeHistoricalLeagueToDb({
+        season,
+        gameKey,
+        leagueKey,
+        teamKey: discovered.teamKeys[0] || null,
+        raw: discovered.raw,
+        standings,
+      });
+      results.push({ leagueKey, teams: buildTeamMetrics(standings).length });
+    } catch (error) {
+      results.push({ leagueKey, error: error.message });
+    }
+  }
+  return results;
+}
+
+async function historyBackfill() {
+  const config = loadConfig();
+  const accessToken = await getAccessToken(config);
+  const seasons = getHistoryBackfillSeasons();
+  const skipLeagues = process.argv.includes("--players-only");
+  const results = [];
+
+  console.log(`Historical backfill seasons: ${seasons.join(", ")}`);
+  for (const season of seasons) {
+    const { gameKey } = await fetchGameKeyForSeason({
+      accessToken,
+      season,
+      gameCode: config.gameKey || "mlb",
+    });
+    console.log(`Season ${season}: game key ${gameKey}`);
+    const playerResult = await backfillHistoricalPlayerSeason({
+      accessToken,
+      season,
+      gameKey,
+    });
+    console.log(
+      `- players: ${playerResult.playerCount} over ${playerResult.pageCount} page(s)`
+    );
+    let leagueResults = [];
+    if (!skipLeagues) {
+      leagueResults = await backfillHistoricalLeagues({ accessToken, season, gameKey });
+      if (leagueResults.length > 0) {
+        leagueResults.forEach((league) => {
+          if (league.error) {
+            console.log(`- league ${league.leagueKey}: ${league.error}`);
+          } else {
+            console.log(`- league ${league.leagueKey}: ${league.teams} team(s)`);
+          }
+        });
+      } else {
+        console.log("- leagues: none discovered for this account/season");
+      }
+    }
+    results.push({ ...playerResult, leagues: leagueResults });
+  }
+
+  console.log(`Historical backfill complete: ${DB_PATH}`);
+  return results;
 }
 
 function buildStatIdByKey(resolvedCategories) {
@@ -5496,6 +5911,8 @@ async function main() {
       await dashboard();
     } else if (command === "benchmark") {
       await benchmark();
+    } else if (command === "history-backfill") {
+      await historyBackfill();
     } else if (command === "app") {
       await app();
     } else if (command === "db-backfill") {
@@ -5510,7 +5927,7 @@ async function main() {
       await lineup();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|benchmark|app|db-backfill|log|recommend|review|snapshot|lineup> [--top N] [--position C] [--port 8787] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|benchmark|history-backfill|app|db-backfill|log|recommend|review|snapshot|lineup> [--top N] [--position C] [--port 8787] [--verbose]"
       );
     }
   } catch (error) {

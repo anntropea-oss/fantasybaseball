@@ -94,6 +94,18 @@ This keeps the current heuristic as the production champion unless a challenger
 beats it across daily and all-runs walk-forward checks. Benchmark summaries are
 stored in `logs/model-benchmark-history.jsonl`.
 
+10. Backfill historical player/team data for model training.
+
+```bash
+node cli.js history-backfill
+```
+
+By default this fetches the last five completed MLB fantasy seasons. It stores
+full paged Yahoo player pools with season stats, plus any historical leagues and
+team standings discoverable from the authenticated Yahoo account. Useful flags:
+`--years 3`, `--seasons 2021,2022,2023,2024,2025`, `--players-only`,
+`--max-pages N`, and `--limit N`.
+
 ## Notes
 
 - The CLI stores OAuth tokens at `.tokens.json`.
@@ -105,6 +117,10 @@ stored in `logs/model-benchmark-history.jsonl`.
   schedule proxies, recommendation counts, add/drop context, archetypes, and
   projection-score coverage. External schedule/projection/news fields are
   explicitly marked as unavailable until a data feed is added.
+- Historical backfill tables are stored in `logs/fantasy.db`:
+  `historical_player_pools`, `historical_players`,
+  `historical_player_stats`, `historical_leagues`, and
+  `historical_team_category_stats`.
 - For recurring runs, you can call `scripts/run-daily.sh` from cron/launchd.
 
 ## Branch Helpers
