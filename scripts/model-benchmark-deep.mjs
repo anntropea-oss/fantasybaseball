@@ -3,6 +3,7 @@ import path from "path";
 
 const ROOT = process.cwd();
 const SNAPSHOT_PATH = path.join(ROOT, "logs", "snapshots.jsonl");
+const DB_PATH = path.join(ROOT, "logs", "fantasy.db");
 
 function parseArgs(argv) {
   const args = {
@@ -141,6 +142,70 @@ function rosterCounts(snapshot) {
   return out;
 }
 
+function playerIdFromKey(playerKey) {
+  const m = /\.p\.(\d+)$/.exec(String(playerKey || ""));
+  return m ? m[1] : null;
+}
+
+async function loadHistoricalIndex(categoryKeys, snapshots) {
+  if (!fs.existsSync(DB_PATH)) return null;
+  const statIds = [
+    ...new Set(
+      snapshots
+        .flatMap((s) => s.categories || [])
+        .filter((c) => categoryKeys.includes(c.key) && c.statId)
+        .map((c) => String(c.statId))
+    ),
+  ];
+  if (statIds.length === 0) return null;
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(DB_PATH, { readOnly: true });
+    const rows = db
+      .prepare(
+        `SELECT hp.player_id, hps.stat_id, hps.season, hps.value
+         FROM historical_player_stats hps
+         JOIN historical_players hp
+           ON hp.season = hps.season
+          AND hp.player_key = hps.player_key
+         WHERE hps.stat_id IN (${statIds.map(() => "?").join(",")})
+           AND hps.value IS NOT NULL`
+      )
+      .all(...statIds);
+    db.close();
+
+    const byPlayer = new Map();
+    rows.forEach((row) => {
+      const playerId = String(row.player_id || "");
+      const statId = String(row.stat_id || "");
+      if (!playerId || !statId) return;
+      if (!byPlayer.has(playerId)) byPlayer.set(playerId, new Map());
+      const byStat = byPlayer.get(playerId);
+      if (!byStat.has(statId)) byStat.set(statId, []);
+      byStat.get(statId).push({ season: Number(row.season), value: toNumber(row.value) ?? 0 });
+    });
+    byPlayer.forEach((byStat) => {
+      byStat.forEach((items, statId) => {
+        const sorted = items.slice().sort((a, b) => a.season - b.season);
+        const values = sorted.map((item) => item.value);
+        byStat.set(statId, {
+          seasons: sorted.length,
+          mean: mean(values),
+          max: values.length ? Math.max(...values) : 0,
+          last: sorted.at(-1)?.value ?? 0,
+          trend:
+            sorted.length >= 2
+              ? (sorted.at(-1).value - sorted[0].value) / Math.max(1, sorted.length - 1)
+              : 0,
+        });
+      });
+    });
+    return { byPlayer };
+  } catch {
+    return null;
+  }
+}
+
 function actionCounts(snapshot) {
   const a = snapshot?.actions || {};
   return {
@@ -178,7 +243,28 @@ function gapFeatures(snapshot, key) {
   ];
 }
 
-function buildRowFeatures(snapshots, index, key, categoryKeys) {
+function historicalAggregate(players, statId, historicalIndex) {
+  const ids = (players || []).map((p) => playerIdFromKey(p.playerKey)).filter(Boolean);
+  const rows = ids
+    .map((id) => historicalIndex?.byPlayer?.get(id)?.get(String(statId)))
+    .filter(Boolean);
+  if (rows.length === 0) return [0, 0, 0, 0, 0];
+  return [
+    mean(rows.map((r) => r.mean)),
+    mean(rows.map((r) => r.max)),
+    mean(rows.map((r) => r.last)),
+    mean(rows.map((r) => r.trend)),
+    mean(rows.map((r) => r.seasons)),
+  ];
+}
+
+function detailPlayers(details) {
+  return (details || [])
+    .map((d) => ({ playerKey: d.playerKey || null, name: d.playerName || null }))
+    .filter((p) => p.playerKey);
+}
+
+function buildRowFeatures(snapshots, index, key, categoryKeys, historicalIndex = null) {
   const s = snapshots[index];
   const fi = s.featureInputs || {};
   const rc = fi.rosterComposition || {};
@@ -199,6 +285,18 @@ function buildRowFeatures(snapshots, index, key, categoryKeys) {
   const actions = actionCounts(s);
   const focusTargets = new Set([...(s.focusTargets || []), ...(s.targets || [])]);
   const bestValueTargets = new Set(s.bestValueTargets || []);
+  const statId = (s.categories || []).find((cat) => cat.key === key)?.statId || null;
+  const rosterPlayers = Array.isArray(s.roster) ? s.roster : [];
+  const isBench = (p) =>
+    Array.isArray(p.selected) && p.selected.some((pos) => ["BN", "BE"].includes(String(pos).toUpperCase()));
+  const activePlayers = rosterPlayers.filter((p) => !isBench(p) && String(p.selectedPrimary || "").toUpperCase() !== "IL");
+  const benchPlayers = rosterPlayers.filter((p) => isBench(p));
+  const addDetails = [
+    ...(s.actionDetails?.addBatting || []),
+    ...(s.actionDetails?.addPitching || []),
+    ...(s.actionDetails?.add || []),
+  ];
+  const dropDetails = s.actionDetails?.drop || [];
 
   const row = [
     toNumber(s.overallRank) ?? 0,
@@ -243,6 +341,11 @@ function buildRowFeatures(snapshots, index, key, categoryKeys) {
     toNumber(featureCategory.nextGap?.deltaToNext) ?? 0,
     toNumber(featureCategory.nextGap?.pointsGainToNext) ?? 0,
     featureCategory.nextGap?.status === "chasing" ? 1 : 0,
+    ...historicalAggregate(rosterPlayers, statId, historicalIndex),
+    ...historicalAggregate(activePlayers, statId, historicalIndex),
+    ...historicalAggregate(benchPlayers, statId, historicalIndex),
+    ...historicalAggregate(detailPlayers(addDetails), statId, historicalIndex),
+    ...historicalAggregate(detailPlayers(dropDetails), statId, historicalIndex),
     ...gapFeatures(s, key),
   ];
 
@@ -490,12 +593,12 @@ function median(values) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function buildTrainingData(snapshots, categoryKeys, trainEndIndex) {
+function buildTrainingData(snapshots, categoryKeys, trainEndIndex, historicalIndex) {
   const X = [];
   const yByKey = new Map(categoryKeys.map((key) => [key, []]));
   for (let i = 0; i < trainEndIndex; i += 1) {
     categoryKeys.forEach((key) => {
-      X.push(buildRowFeatures(snapshots, i, key, categoryKeys));
+      X.push(buildRowFeatures(snapshots, i, key, categoryKeys, historicalIndex));
       yByKey.get(key).push(categoryDelta(snapshots[i], snapshots[i + 1], key));
     });
   }
@@ -503,7 +606,7 @@ function buildTrainingData(snapshots, categoryKeys, trainEndIndex) {
   const byKeyX = new Map(categoryKeys.map((key) => [key, []]));
   for (let i = 0; i < trainEndIndex; i += 1) {
     categoryKeys.forEach((key) => {
-      byKeyX.get(key).push(buildRowFeatures(snapshots, i, key, categoryKeys));
+      byKeyX.get(key).push(buildRowFeatures(snapshots, i, key, categoryKeys, historicalIndex));
     });
   }
   return { byKeyX, yByKey };
@@ -514,8 +617,9 @@ function predictKnn(trainX, trainY, row, k) {
   return mean(dists.slice(0, Math.min(k, dists.length)).map(({ i }) => trainY[i]));
 }
 
-function runBenchmark(snapshots, args) {
+async function runBenchmark(snapshots, args) {
   const categoryKeys = snapshots[0]?.categories?.map((cat) => cat.key) || [];
+  const historicalIndex = await loadHistoricalIndex(categoryKeys, snapshots);
   const methods = new Map([
     ["baseline", []],
     ["oracle", []],
@@ -544,7 +648,7 @@ function runBenchmark(snapshots, args) {
       categoryKeys.map((key) => [key, trailingMeanDelta(snapshots, t, key, Math.min(7, t))])
     );
 
-    const { byKeyX, yByKey } = buildTrainingData(snapshots, categoryKeys, t);
+    const { byKeyX, yByKey } = buildTrainingData(snapshots, categoryKeys, t, historicalIndex);
     const allTrainX = [...byKeyX.values()].flat();
     const scaler = fitScaler(allTrainX);
     const ridgeScores = new Map();
@@ -556,7 +660,10 @@ function runBenchmark(snapshots, args) {
       const trainXRaw = byKeyX.get(key);
       const trainY = yByKey.get(key);
       const trainX = applyScaler(trainXRaw, scaler);
-      const row = applyScaler([buildRowFeatures(snapshots, t, key, categoryKeys)], scaler)[0];
+      const row = applyScaler(
+        [buildRowFeatures(snapshots, t, key, categoryKeys, historicalIndex)],
+        scaler
+      )[0];
 
       knnScores.set(key, predictKnn(trainX, trainY, row, args.knnK));
 
@@ -606,6 +713,7 @@ function runBenchmark(snapshots, args) {
 
   return {
     categoryKeys,
+    historicalFeatures: !!historicalIndex,
     methods: Object.fromEntries([...methods.entries()].map(([method, rows]) => [method, evaluate(rows)])),
     rows: Object.fromEntries(methods),
   };
@@ -631,7 +739,7 @@ const filtered = selected.filter((s) => {
   return d && d >= cutoff;
 });
 
-const result = runBenchmark(filtered, args);
+const result = await runBenchmark(filtered, args);
 const baseline = result.methods.baseline;
 const summary = {
   generatedAt: new Date().toISOString(),
@@ -645,6 +753,7 @@ const summary = {
   },
   params: args,
   categoryKeys: result.categoryKeys,
+  historicalFeatures: result.historicalFeatures,
   methods: Object.fromEntries(
     Object.entries(result.methods).map(([method, metrics]) => [
       method,
