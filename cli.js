@@ -1241,6 +1241,7 @@ function buildSnapshotFeatures({
   actionDetails,
   dropSuggestions,
   addCandidates,
+  dropDiagnostics,
 }) {
   const roster = Array.isArray(rosterMappedPlayers) ? rosterMappedPlayers : [];
   const actions = actionSuggestions || {};
@@ -1351,6 +1352,8 @@ function buildSnapshotFeatures({
         projectedAdds: projectedAdds.length,
         archetypeTaggedAdds: projectedAdds.filter((d) => d.archetype).length,
       },
+      protectedInjuryReviews: dropDiagnostics?.protectedInjuryReviews || [],
+      dropDiagnostics: dropDiagnostics || null,
       addDetails: projectedAdds.map((d) => ({
         playerKey: d.playerKey || null,
         playerName: d.playerName || null,
@@ -1368,6 +1371,7 @@ function buildSnapshotFeatures({
         positions: d.positions || [],
         status: d.status || null,
         statusDrop: !!d.statusDrop,
+        injuryReview: d.injuryReview || null,
         statsScore: toNumber(d.statsScore),
         yahooRank: toNumber(d.yahooRank),
       })),
@@ -1690,6 +1694,13 @@ function isRecentInjuryReview(config, review) {
   return ageDays >= 0 && ageDays <= injuryReviewMaxAgeDays(config);
 }
 
+function injuryReviewAgeDays(review) {
+  const reviewedDate = parseReviewDate(review?.reviewedAt);
+  const today = parseIsoDate(todayDateString());
+  if (!reviewedDate || !today) return null;
+  return daysBetweenUtc(reviewedDate, today);
+}
+
 function reviewMatchesPlayer(review, player) {
   const reviewName = normalizeNameKey(review?.playerName ?? review?.name);
   const playerName = normalizeNameKey(player?.name);
@@ -1698,31 +1709,99 @@ function reviewMatchesPlayer(review, player) {
   return Boolean(reviewPlayerKey && player?.playerKey && reviewPlayerKey === player.playerKey);
 }
 
-function getAllowedProtectedInjuryDropReview(config, player) {
-  if (!player || player.isPitcher) return null;
-  if (!(isILStatus(player.status) || player.isIL)) return null;
+function findLatestInjuryDropReview(config, player) {
   const reviews = Array.isArray(config?.injuryDropReviews)
     ? config.injuryDropReviews
     : [];
-  const matchingReviews = reviews
+  return reviews
     .filter((review) => reviewMatchesPlayer(review, player))
     .sort((a, b) =>
       String(b?.reviewedAt || "").localeCompare(String(a?.reviewedAt || ""))
-    );
-  return (
-    matchingReviews.find(
-      (review) =>
-        review?.reviewedAllInjuryNews === true &&
-        injuryReviewHasEvidence(review) &&
-        injuryReviewSaysOutBeyond30Days(review) &&
-        isRecentInjuryReview(config, review)
-    ) || null
-  );
+    )[0] || null;
+}
+
+function getProtectedInjuryReviewState(config, player) {
+  const review = findLatestInjuryDropReview(config, player);
+  const maxAgeDays = injuryReviewMaxAgeDays(config);
+  const reviewAgeDays = injuryReviewAgeDays(review);
+  const hasReview = !!review;
+  const reviewedAllInjuryNews = review?.reviewedAllInjuryNews === true;
+  const hasEvidence = injuryReviewHasEvidence(review);
+  const saysOutBeyond30Days = injuryReviewSaysOutBeyond30Days(review);
+  const isRecent =
+    reviewAgeDays !== null && reviewAgeDays >= 0 && reviewAgeDays <= maxAgeDays;
+  let reviewStatus = "missing";
+  let reason = "No injury review on file.";
+
+  if (hasReview) {
+    if (!reviewedAllInjuryNews || !hasEvidence) {
+      reviewStatus = "incomplete";
+      reason = "Review exists but is missing all-news confirmation or evidence.";
+    } else if (!saysOutBeyond30Days) {
+      reviewStatus = "not_out_beyond_30";
+      reason = "Review does not say the player is more likely than not out beyond 30 days.";
+    } else if (!isRecent) {
+      reviewStatus = "stale";
+      reason = `Review is older than ${maxAgeDays} days.`;
+    } else {
+      reviewStatus = "eligible";
+      reason = "Recent review supports more-likely-than-not absence beyond 30 days.";
+    }
+  }
+
+  return {
+    playerKey: player?.playerKey || null,
+    name: player?.name || null,
+    status: player?.status || null,
+    selectedPrimary:
+      player?.selectedPrimary || extractPrimarySelectedPosition(player?.selected || []),
+    positions: player?.positions || [],
+    reviewStatus,
+    dropEligible: reviewStatus === "eligible",
+    reviewedAt: review?.reviewedAt || null,
+    reviewAgeDays,
+    maxAgeDays,
+    reviewedAllInjuryNews,
+    expectedOutDays: review ? toNumber(review.expectedOutDays) : null,
+    likelyBackWithin30Days:
+      typeof review?.likelyBackWithin30Days === "boolean"
+        ? review.likelyBackWithin30Days
+        : null,
+    likelyOutMoreThan30Days:
+      typeof review?.likelyOutMoreThan30Days === "boolean"
+        ? review.likelyOutMoreThan30Days
+        : null,
+    sourceCount: Array.isArray(review?.sources)
+      ? review.sources.filter((source) => String(source || "").trim() !== "").length
+      : 0,
+    hasNotes: String(review?.notes || "").trim() !== "",
+    reason,
+  };
+}
+
+function getAllowedProtectedInjuryDropReview(config, player) {
+  if (!player || player.isPitcher) return null;
+  if (!(isILStatus(player.status) || player.isIL)) return null;
+  const review = findLatestInjuryDropReview(config, player);
+  return getProtectedInjuryReviewState(config, player).dropEligible
+    ? review
+    : null;
 }
 
 function isDropBlockedByDoNotDrop(config, doNotDrop, player) {
   if (!doNotDrop.has(normalizeNameKey(player?.name))) return false;
   return !getAllowedProtectedInjuryDropReview(config, player);
+}
+
+function buildProtectedInjuryReviewStates(config, doNotDrop, roster) {
+  return (Array.isArray(roster) ? roster : [])
+    .filter(
+      (player) =>
+        doNotDrop.has(normalizeNameKey(player?.name)) &&
+        !player.isPitcher &&
+        (player.isIL || isILStatus(player.status))
+    )
+    .map((player) => getProtectedInjuryReviewState(config, player));
 }
 
 function isILPosition(positions) {
@@ -4076,6 +4155,17 @@ async function recommend({ snapshotOnly = false } = {}) {
   let dropMessage = null;
   let dropLines = [];
   let dropSuggestions = [];
+  let dropDiagnostics = {
+    addCandidateCount: 0,
+    safeDropCandidates: 0,
+    statusDropCandidates: 0,
+    dropPoolCandidates: 0,
+    protectedInjuryReviews: [],
+    staleProtectedInjuryReviews: [],
+    blockedProtectedDrops: [],
+    noAddReason: null,
+    noDropReason: null,
+  };
   const actionSuggestions = {
     addBatting: [],
     addPitching: [],
@@ -4112,6 +4202,7 @@ async function recommend({ snapshotOnly = false } = {}) {
           name,
           positions,
           selected,
+          selectedPrimary: extractPrimarySelectedPosition(selected),
           rank,
           playerKey,
           stats,
@@ -4124,6 +4215,24 @@ async function recommend({ snapshotOnly = false } = {}) {
     } catch {
       // ok: snapshot will still contain standings/category data
     }
+    const snapshotDoNotDrop = new Set(
+      (config.doNotDrop || []).map(normalizeNameKey)
+    );
+    const protectedInjuryReviews = buildProtectedInjuryReviewStates(
+      config,
+      snapshotDoNotDrop,
+      rosterMappedPlayers
+    );
+    dropDiagnostics = {
+      ...dropDiagnostics,
+      protectedInjuryReviews,
+      staleProtectedInjuryReviews: protectedInjuryReviews.filter(
+        (state) => state.reviewStatus === "stale"
+      ),
+      blockedProtectedDrops: protectedInjuryReviews.filter(
+        (state) => !state.dropEligible
+      ),
+    };
 
     console.log(cYellow("Actions: snapshot-only (no recommendations computed)."));
     console.log("");
@@ -4139,6 +4248,7 @@ async function recommend({ snapshotOnly = false } = {}) {
       actionDetails,
       dropSuggestions: [],
       addCandidates: [],
+      dropDiagnostics,
     });
     await finalizeAndLogRun({
       config,
@@ -4294,6 +4404,7 @@ async function recommend({ snapshotOnly = false } = {}) {
           name,
           positions,
           selected,
+          selectedPrimary: extractPrimarySelectedPosition(selected),
           rank,
           playerKey,
           stats,
@@ -4304,6 +4415,21 @@ async function recommend({ snapshotOnly = false } = {}) {
         };
       });
     rosterMappedPlayers = mappedPlayers;
+    const protectedInjuryReviews = buildProtectedInjuryReviewStates(
+      config,
+      doNotDrop,
+      mappedPlayers
+    );
+    dropDiagnostics = {
+      ...dropDiagnostics,
+      protectedInjuryReviews,
+      staleProtectedInjuryReviews: protectedInjuryReviews.filter(
+        (state) => state.reviewStatus === "stale"
+      ),
+      blockedProtectedDrops: protectedInjuryReviews.filter(
+        (state) => !state.dropEligible
+      ),
+    };
     const activeCatchers = mappedPlayers.filter(
       (player) =>
         isCatcherPositions(player.positions) &&
@@ -4415,6 +4541,11 @@ async function recommend({ snapshotOnly = false } = {}) {
             : player.rank === null || player.rank >= dropRankFloorPrimary) &&
           !(player.isPitcher && player.positions.includes("SP") && player.rank === null)
       );
+      dropDiagnostics = {
+        ...dropDiagnostics,
+        statusDropCandidates: statusAnywhereCandidates.length,
+        dropPoolCandidates: dropPool.length,
+      };
       const statKeysForType = (isPitcher) =>
         isPitcher ? pitchingCategories : battingCategories;
       const weakKeysForType = (isPitcher) => {
@@ -4585,7 +4716,14 @@ async function recommend({ snapshotOnly = false } = {}) {
       }
 
       if (dropSuggestions.length === 0 && !dropPrinted) {
-        dropMessage = "DROP: recent stats unavailable.";
+        dropMessage =
+          protectedInjuryReviews.length > 0 && dropPool.length === 0
+            ? "DROP: none (no safe drop candidates after protections)."
+            : "DROP: recent stats unavailable.";
+        dropDiagnostics = {
+          ...dropDiagnostics,
+          noDropReason: dropMessage.replace(/^DROP:\s*/i, ""),
+        };
       }
     }
   } catch (error) {
@@ -4683,6 +4821,11 @@ async function recommend({ snapshotOnly = false } = {}) {
     ...addPositionCandidates,
     ...addPositionAllCandidates,
   ];
+  dropDiagnostics = {
+    ...dropDiagnostics,
+    addCandidateCount: allAddCandidates.length,
+    safeDropCandidates: dropSuggestions.length,
+  };
   const addKeys = allAddCandidates.map((candidate) => candidate.playerKey).filter(Boolean);
   if (addKeys.length > 0) {
     const addStatsResult = await fetchPlayerStatsByKeys({
@@ -4918,6 +5061,10 @@ async function recommend({ snapshotOnly = false } = {}) {
         projected !== null && projected !== undefined ? projected : drop.statsScore,
     };
   });
+  dropDiagnostics = {
+    ...dropDiagnostics,
+    safeDropCandidates: dropSuggestions.length,
+  };
 
   // Rebuild queues now that drop suggestions may have history-informed statsScore.
   dropHittersQueue = dropSuggestions
@@ -4996,6 +5143,22 @@ async function recommend({ snapshotOnly = false } = {}) {
       }
     });
   };
+  const protectedReviewLine = (state) => {
+    const status = state.status ? `${state.status}` : "IL";
+    if (state.reviewStatus === "eligible") {
+      return `${state.name}: protected ${status}, reviewed ${state.reviewedAt}; eligible only because review says >30 days.`;
+    }
+    if (state.reviewStatus === "stale") {
+      return `${state.name}: protected ${status}, injury review is stale (${state.reviewAgeDays} days old; max ${state.maxAgeDays}).`;
+    }
+    if (state.reviewStatus === "not_out_beyond_30") {
+      return `${state.name}: protected ${status}, review does not support >30 days out.`;
+    }
+    if (state.reviewStatus === "incomplete") {
+      return `${state.name}: protected ${status}, review is incomplete.`;
+    }
+    return `${state.name}: protected ${status}, no qualifying >30-day injury review.`;
+  };
 
   if (savesEmergency) {
     // When we're at/near zero saves, spend our limited drop slots on RP adds first.
@@ -5015,7 +5178,44 @@ async function recommend({ snapshotOnly = false } = {}) {
       addPositionCandidates.length > 0)
   ) {
     printActionsHeader();
-    console.log(cYellow("ADD:") + " " + fmtLine("none (no safe drop upgrades available)."));
+    if (dropDiagnostics.safeDropCandidates === 0) {
+      dropDiagnostics = {
+        ...dropDiagnostics,
+        noAddReason: "No safe drop candidates after protections.",
+      };
+      console.log(
+        cYellow("ADD:") +
+          " " +
+          fmtLine(
+            `none (${dropDiagnostics.addCandidateCount} add candidates, 0 safe drop candidates after protections).`
+          )
+      );
+      if (dropDiagnostics.blockedProtectedDrops.length > 0) {
+        console.log(cYellow("Protected IL checks:"));
+        dropDiagnostics.blockedProtectedDrops.slice(0, 5).forEach((state) => {
+          console.log(fmtBullet(protectedReviewLine(state)));
+        });
+      }
+    } else {
+      dropDiagnostics = {
+        ...dropDiagnostics,
+        noAddReason: "Safe drops exist, but no add cleared upgrade thresholds.",
+      };
+      console.log(
+        cYellow("ADD:") +
+          " " +
+          fmtLine(
+            `none (${dropDiagnostics.safeDropCandidates} safe drops exist, but no add cleared rank/stat upgrade thresholds).`
+          )
+      );
+    }
+  }
+  if (dropDiagnostics.staleProtectedInjuryReviews.length > 0) {
+    printActionsHeader();
+    console.log(cYellow("Injury review warning:"));
+    dropDiagnostics.staleProtectedInjuryReviews.slice(0, 5).forEach((state) => {
+      console.log(fmtBullet(protectedReviewLine(state)));
+    });
   }
 
   if (startSelections.length > 0) {
@@ -5079,6 +5279,7 @@ async function recommend({ snapshotOnly = false } = {}) {
           yahooRank: dropSuggestions[idx].rank ?? null,
           statsScore: dropSuggestions[idx].statsScore ?? null,
           statusDrop: !!dropSuggestions[idx].statusDrop,
+          injuryReview: dropSuggestions[idx].injuryReview || null,
           why: dropSuggestions[idx].reason || "Safe drop candidate based on current roster rules.",
         });
       }
@@ -5130,6 +5331,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     actionDetails,
     dropSuggestions,
     addCandidates: allAddCandidates,
+    dropDiagnostics,
   });
 
   await finalizeAndLogRun({

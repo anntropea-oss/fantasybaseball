@@ -120,7 +120,11 @@ team standings discoverable from the authenticated Yahoo account. Useful flags:
 - Protected players in `doNotDrop` are never recommended as drops unless they
   are hitters on IL/IR and have a recent `injuryDropReviews` entry showing all
   injury news was reviewed and the player is more likely than not out beyond 30
-  days. Example:
+  days. The CLI prints protected-IL checks when these players block add/drop
+  moves and warns when an injury review is older than
+  `protectedInjuryReviewMaxAgeDays`. Snapshots record the same state under
+  `featureInputs.recommendationContext.protectedInjuryReviews` and
+  `dropDiagnostics`. Example:
 
 ```json
 {

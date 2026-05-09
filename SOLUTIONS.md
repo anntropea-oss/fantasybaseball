@@ -5,3 +5,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/config.example.json`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/config.json`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` completed and preserved the champion heuristic default while keeping Acuña/Stanton protected because neither has a qualifying >30-day injury review.
+
+## [2026-05-09 10:26] Add Drop Diagnostics And Injury Review Snapshot Fields
+- Problem: When no add/drop move was available, the CLI did not explain whether the blocker was missing add candidates, missing safe drops, protected IL players, stale injury reviews, or upgrade thresholds; snapshots also did not preserve protected IL injury-review state for later model analysis.
+- Root Cause: Recommendation output only emitted final action lists, and `featureInputs.recommendationContext` stored candidate counts without the protection/review diagnostics that caused those counts.
+- Solution: Added drop diagnostics to the recommendation flow, printed protected IL checks when protections block add/drop moves, added stale injury-review warnings, and wrote `protectedInjuryReviews` plus `dropDiagnostics` into snapshot feature inputs.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` printed 6 add candidates, 0 safe drops, and protected IL checks for Stanton and Acuña; latest snapshot contains `featureInputs.recommendationContext.protectedInjuryReviews` and `dropDiagnostics`.
