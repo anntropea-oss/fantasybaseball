@@ -38,6 +38,7 @@ const FREE_AGENT_COUNT = 50;
 const FREE_AGENT_COUNT_POSITION = 200;
 const FREE_AGENT_COUNT_SAVES = 200;
 const PROTECT_TOP_YAHOO_RANK = 30;
+const PROTECTED_INJURY_REVIEW_MAX_AGE_DAYS = 7;
 const HISTORY_SEASONS = 5;
 const HITTER_STABILIZER_AB = 200;
 const PITCHER_STABILIZER_IP = 30;
@@ -1641,6 +1642,87 @@ function isDropStatus(status) {
   const normalized = status.toString().trim().toUpperCase();
   // Droppable statuses: long/unknown absences. (DTD is too noisy and can include studs.)
   return normalized.startsWith("IL") || normalized === "IR" || normalized === "NA";
+}
+
+function normalizeNameKey(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function parseReviewDate(reviewedAt) {
+  if (!reviewedAt) return null;
+  return parseIsoDate(String(reviewedAt).slice(0, 10));
+}
+
+function injuryReviewMaxAgeDays(config) {
+  const configured = toNumber(config?.protectedInjuryReviewMaxAgeDays);
+  if (configured !== null && configured >= 0) return configured;
+  return PROTECTED_INJURY_REVIEW_MAX_AGE_DAYS;
+}
+
+function injuryReviewHasEvidence(review) {
+  if (!review || typeof review !== "object") return false;
+  const sources = Array.isArray(review.sources)
+    ? review.sources.filter((source) => String(source || "").trim() !== "")
+    : [];
+  const notes = String(review.notes || "").trim();
+  return sources.length > 0 || notes.length > 0;
+}
+
+function injuryReviewSaysOutBeyond30Days(review) {
+  if (!review || typeof review !== "object") return false;
+  const expectedOutDays = toNumber(
+    review.expectedOutDays ?? review.expectedDaysOut ?? review.daysOut
+  );
+  const probabilityBackWithin30Days = toNumber(review.probabilityBackWithin30Days);
+  return (
+    review.likelyOutMoreThan30Days === true ||
+    review.likelyBackWithin30Days === false ||
+    (expectedOutDays !== null && expectedOutDays > 30) ||
+    (probabilityBackWithin30Days !== null && probabilityBackWithin30Days < 0.5)
+  );
+}
+
+function isRecentInjuryReview(config, review) {
+  const reviewedDate = parseReviewDate(review?.reviewedAt);
+  const today = parseIsoDate(todayDateString());
+  if (!reviewedDate || !today) return false;
+  const ageDays = daysBetweenUtc(reviewedDate, today);
+  return ageDays >= 0 && ageDays <= injuryReviewMaxAgeDays(config);
+}
+
+function reviewMatchesPlayer(review, player) {
+  const reviewName = normalizeNameKey(review?.playerName ?? review?.name);
+  const playerName = normalizeNameKey(player?.name);
+  if (reviewName && playerName && reviewName === playerName) return true;
+  const reviewPlayerKey = String(review?.playerKey || "").trim();
+  return Boolean(reviewPlayerKey && player?.playerKey && reviewPlayerKey === player.playerKey);
+}
+
+function getAllowedProtectedInjuryDropReview(config, player) {
+  if (!player || player.isPitcher) return null;
+  if (!(isILStatus(player.status) || player.isIL)) return null;
+  const reviews = Array.isArray(config?.injuryDropReviews)
+    ? config.injuryDropReviews
+    : [];
+  const matchingReviews = reviews
+    .filter((review) => reviewMatchesPlayer(review, player))
+    .sort((a, b) =>
+      String(b?.reviewedAt || "").localeCompare(String(a?.reviewedAt || ""))
+    );
+  return (
+    matchingReviews.find(
+      (review) =>
+        review?.reviewedAllInjuryNews === true &&
+        injuryReviewHasEvidence(review) &&
+        injuryReviewSaysOutBeyond30Days(review) &&
+        isRecentInjuryReview(config, review)
+    ) || null
+  );
+}
+
+function isDropBlockedByDoNotDrop(config, doNotDrop, player) {
+  if (!doNotDrop.has(normalizeNameKey(player?.name))) return false;
+  return !getAllowedProtectedInjuryDropReview(config, player);
 }
 
 function isILPosition(positions) {
@@ -4195,7 +4277,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     writeDebugJson(`roster-${statType || "base"}`, roster);
 
     const doNotDrop = new Set(
-      (config.doNotDrop || []).map((name) => name.toLowerCase())
+      (config.doNotDrop || []).map(normalizeNameKey)
     );
     const rosterPlayers = findAllValuesByKey(roster, "player");
     rosterState = buildRosterState(rosterPlayers);
@@ -4237,7 +4319,7 @@ async function recommend({ snapshotOnly = false } = {}) {
       (player) =>
         isDropStatus(player.status) &&
         canDropCatcher(player) &&
-        !doNotDrop.has(player.name.toLowerCase())
+        !isDropBlockedByDoNotDrop(config, doNotDrop, player)
     );
     let benchPlayers = allBenchPlayers.filter((player) => !player.isIL);
 
@@ -4325,7 +4407,7 @@ async function recommend({ snapshotOnly = false } = {}) {
       const dropPool = allBenchPlayers.filter(
         (player) =>
           !startKeys.has(playerKey(player)) &&
-          !doNotDrop.has(player.name.toLowerCase()) &&
+          !isDropBlockedByDoNotDrop(config, doNotDrop, player) &&
           canDropCatcher(player) &&
           !isProtectedBenchPlayer(player) &&
           (savesEmergency
@@ -4351,6 +4433,7 @@ async function recommend({ snapshotOnly = false } = {}) {
         statusCandidates.slice(0, topLimit).forEach((player) => {
           const position = player.positions.join(", ");
           const statusText = player.status ? `${player.status}` : "STATUS";
+          const injuryReview = getAllowedProtectedInjuryDropReview(config, player);
           dropLines.push(
             `- ${player.name} ${position ? `(${position})` : ""} (${statusText})`.trim()
           );
@@ -4362,7 +4445,18 @@ async function recommend({ snapshotOnly = false } = {}) {
               statusDrop: true,
               positions: player.positions,
               status: player.status,
-              reason: `Status ${statusText} makes this the safest roster churn.`,
+              injuryReview: injuryReview
+                ? {
+                    reviewedAt: injuryReview.reviewedAt || null,
+                    expectedOutDays: injuryReview.expectedOutDays ?? null,
+                    sources: Array.isArray(injuryReview.sources)
+                      ? injuryReview.sources
+                      : [],
+                  }
+                : null,
+              reason: injuryReview
+                ? `Protected IL exception: injury news reviewed ${injuryReview.reviewedAt}; more likely than not out beyond 30 days.`
+                : `Status ${statusText} makes this the safest roster churn.`,
             });
         });
         dropPrinted = true;
@@ -4424,7 +4518,7 @@ async function recommend({ snapshotOnly = false } = {}) {
             .filter(
               (player) =>
                 !startKeys.has(playerKey(player)) &&
-                !doNotDrop.has(player.name.toLowerCase()) &&
+                !isDropBlockedByDoNotDrop(config, doNotDrop, player) &&
                 (savesEmergency
                   ? !isProtectedBenchPlayer(player)
                   : player.rank >= dropRankFloorPrimary)
@@ -4460,7 +4554,7 @@ async function recommend({ snapshotOnly = false } = {}) {
             .filter(
               (player) =>
                 !startKeys.has(playerKey(player)) &&
-                !doNotDrop.has(player.name.toLowerCase()) &&
+                !isDropBlockedByDoNotDrop(config, doNotDrop, player) &&
                 !savesEmergency &&
                 player.rank >= dropRankFloorSecondary &&
                 player.rank < dropRankFloorPrimary

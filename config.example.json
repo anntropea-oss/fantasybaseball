@@ -6,6 +6,8 @@
   "leagueName": "",
   "teamName": "",
   "doNotDrop": [],
+  "protectedInjuryReviewMaxAgeDays": 7,
+  "injuryDropReviews": [],
   "gameKey": "mlb",
   "leagueKey": "",
   "teamKey": ""

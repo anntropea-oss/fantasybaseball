@@ -117,6 +117,27 @@ team standings discoverable from the authenticated Yahoo account. Useful flags:
   schedule proxies, recommendation counts, add/drop context, archetypes, and
   projection-score coverage. External schedule/projection/news fields are
   explicitly marked as unavailable until a data feed is added.
+- Protected players in `doNotDrop` are never recommended as drops unless they
+  are hitters on IL/IR and have a recent `injuryDropReviews` entry showing all
+  injury news was reviewed and the player is more likely than not out beyond 30
+  days. Example:
+
+```json
+{
+  "protectedInjuryReviewMaxAgeDays": 7,
+  "injuryDropReviews": [
+    {
+      "playerName": "Anthony Santander",
+      "reviewedAt": "2026-05-09",
+      "reviewedAllInjuryNews": true,
+      "likelyBackWithin30Days": false,
+      "expectedOutDays": 60,
+      "sources": ["https://www.mlb.com/news/anthony-santander-talks-shoulder-injury-2026-timeline"],
+      "notes": "Shoulder surgery rehab estimate is five to six months."
+    }
+  ]
+}
+```
 - Historical backfill tables are stored in `logs/fantasy.db`:
   `historical_player_pools`, `historical_players`,
   `historical_player_stats`, `historical_leagues`, and
