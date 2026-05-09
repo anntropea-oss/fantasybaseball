@@ -175,6 +175,20 @@ test("dashboard publish writes docs/index.html", async () => {
   assert.match(html, /<!doctype html>/i);
   assert.match(html, /Fantasy Baseball Tracker/);
   assert.match(html, /Window: 2026-05-01 → 2026-05-02/);
+  assert.match(html, /dashboard-data\.json/);
+  assert.match(html, /dashboard\.js/);
+
+  const dataPath = path.join(cwd, "docs", "dashboard-data.json");
+  const jsPath = path.join(cwd, "docs", "dashboard.js");
+  assert.equal(fs.existsSync(dataPath), true);
+  assert.equal(fs.existsSync(jsPath), true);
+  const data = JSON.parse(await fsp.readFile(dataPath, "utf8"));
+  assert.equal(data.windowStart, "2026-05-01");
+  assert.equal(data.windowEnd, "2026-05-02");
+  assert.ok(Array.isArray(data.dates));
+  assert.ok(data.latest.actions.addPitching.includes("Closer Spec"));
+  const js = await fsp.readFile(jsPath, "utf8");
+  assert.match(js, /setInterval\(poll, REFRESH_MS\)/);
 });
 
 test("local app exposes stable JSON API contracts", async () => {

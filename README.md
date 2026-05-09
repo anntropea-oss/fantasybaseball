@@ -78,11 +78,26 @@ Use a custom port if needed:
 node cli.js app --port 8790
 ```
 
-8. Publish the dashboard to GitHub Pages output (writes `docs/index.html`).
+8. Publish the dashboard to GitHub Pages output.
 
 ```bash
 node cli.js dashboard --publish
 ```
+
+The GitHub Pages dashboard is a static client app backed by
+`docs/dashboard-data.json`. It loads instantly from embedded data, then polls
+`dashboard-data.json` every 60 seconds and redraws when the published data
+changes. Because GitHub Pages cannot run the Yahoo API or local SQLite process,
+the data still has to be regenerated and pushed. For near-real-time Pages
+updates from cron/launchd, run:
+
+```bash
+FANTASY_PUBLISH_PAGES=1 scripts/run-daily.sh
+```
+
+That captures a recommendation, regenerates `docs/index.html`,
+`docs/dashboard-data.json`, and `docs/dashboard.js`, then commits and pushes
+only those dashboard artifacts if they changed.
 
 9. Run the champion/challenger model benchmark.
 

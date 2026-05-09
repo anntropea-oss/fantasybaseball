@@ -13,3 +13,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` printed 6 add candidates, 0 safe drops, and protected IL checks for Stanton and Acuña; latest snapshot contains `featureInputs.recommendationContext.protectedInjuryReviews` and `dropDiagnostics`.
+
+## [2026-05-09 10:36] Make GitHub Pages Dashboard Data-Driven
+- Problem: The GitHub Pages dashboard was a fully static `docs/index.html`, so open browser tabs could not update when new recommendations were published, and the page had to be regenerated and reloaded to show current data.
+- Root Cause: `scripts/dashboard.mjs` baked chart SVG directly into HTML and did not publish a separate data feed for client-side polling.
+- Solution: Changed the dashboard publisher to write `docs/dashboard-data.json` and `docs/dashboard.js`; `docs/index.html` now embeds initial data, preloads the JSON feed, and the browser redraws charts/latest recommendations every 60 seconds when the JSON changes. Added optional `FANTASY_PUBLISH_PAGES=1 scripts/run-daily.sh` support to regenerate, commit, and push only dashboard artifacts from cron/launchd.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/scripts/dashboard.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/scripts/run-daily.sh`, `/Users/atropea/coding/fantasy baseball/fantasy/tests/e2e/run-e2e.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/index.html`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard-data.json`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard.js`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check scripts/dashboard.mjs`, `node --check docs/dashboard.js`, and `bash -n scripts/run-daily.sh` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5 after adding asserts for the dynamic dashboard assets.
