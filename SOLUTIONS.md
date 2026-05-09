@@ -28,4 +28,4 @@
 - Solution: Added a branch guard to `scripts/run-daily.sh` so automated Pages publishes fail loudly unless run from the configured Pages branch, documented that Pages data must be pushed to `main`, and fast-forwarded `main` to the tested feature branch.
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/scripts/run-daily.sh`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
-- Verification: Pending live GitHub Pages refresh after pushing `main`.
+- Verification: Pushed `main` and polled `https://anntropea-oss.github.io/fantasybaseball/`; live HTML now includes `dashboard-data.json`, window `2026-04-11` to `2026-05-09`, and update timestamp `2026-05-09T14:35:45.926Z`.
