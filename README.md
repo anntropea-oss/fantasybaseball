@@ -88,8 +88,9 @@ The GitHub Pages dashboard is a static client app backed by
 `docs/dashboard-data.json`. It loads instantly from embedded data, then polls
 `dashboard-data.json` every 60 seconds and redraws when the published data
 changes. Because GitHub Pages cannot run the Yahoo API or local SQLite process,
-the data still has to be regenerated and pushed. For near-real-time Pages
-updates from cron/launchd, run:
+the data still has to be regenerated and pushed to the branch configured as the
+GitHub Pages source, currently `main`. For near-real-time Pages updates from
+cron/launchd, run from that branch:
 
 ```bash
 FANTASY_PUBLISH_PAGES=1 scripts/run-daily.sh

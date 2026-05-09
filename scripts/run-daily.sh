@@ -18,6 +18,13 @@ cd "$ROOT_DIR"
 node cli.js recommend
 
 if [[ "${FANTASY_PUBLISH_PAGES:-0}" == "1" ]]; then
+  pages_branch="${FANTASY_PAGES_BRANCH:-main}"
+  current_branch="$(git branch --show-current)"
+  if [[ "$current_branch" != "$pages_branch" ]]; then
+    echo "Dashboard publish refused: GitHub Pages is expected on '$pages_branch', but current branch is '$current_branch'." >&2
+    echo "Switch to '$pages_branch' or set FANTASY_PAGES_BRANCH to the branch configured in GitHub Pages." >&2
+    exit 1
+  fi
   node cli.js dashboard --publish
   git add docs/index.html docs/dashboard-data.json docs/dashboard.js
   if git diff --cached --quiet -- docs/index.html docs/dashboard-data.json docs/dashboard.js; then

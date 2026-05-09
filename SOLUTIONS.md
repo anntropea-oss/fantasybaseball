@@ -21,3 +21,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/scripts/dashboard.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/scripts/run-daily.sh`, `/Users/atropea/coding/fantasy baseball/fantasy/tests/e2e/run-e2e.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/index.html`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard-data.json`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard.js`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check scripts/dashboard.mjs`, `node --check docs/dashboard.js`, and `bash -n scripts/run-daily.sh` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5 after adding asserts for the dynamic dashboard assets.
+
+## [2026-05-09 10:40] GitHub Pages Served Main Instead Of Feature Branch
+- Problem: The public GitHub Pages dashboard still showed the April 24 static page after the updated dashboard was committed and pushed.
+- Root Cause: GitHub Pages was serving the default `main` branch, but the updated `docs/` dashboard artifacts had only been pushed to `feature/e2e-test-suite`.
+- Solution: Added a branch guard to `scripts/run-daily.sh` so automated Pages publishes fail loudly unless run from the configured Pages branch, documented that Pages data must be pushed to `main`, and fast-forwarded `main` to the tested feature branch.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/scripts/run-daily.sh`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: Pending live GitHub Pages refresh after pushing `main`.
