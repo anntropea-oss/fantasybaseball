@@ -2586,25 +2586,48 @@ function buildEffectivenessSummary(snapshots, currentSnapshot) {
   }
   if (!prevSnapshot) return null;
 
-  let adherenceBaseSnapshot = prevSnapshot;
-  if (!Array.isArray(adherenceBaseSnapshot.actions?.start) || adherenceBaseSnapshot.actions.start.length === 0) {
-    for (let i = snapshots.length - 2; i >= 0; i -= 1) {
-      const s = snapshots[i];
-      if (!s || s.id === currentSnapshot.id) continue;
-      if (s.date && currentSnapshot.date && s.date === currentSnapshot.date) continue;
-      if (Array.isArray(s.actions?.start) && s.actions.start.length > 0) {
-        adherenceBaseSnapshot = s;
-        break;
-      }
+  const adherenceCandidates = [];
+  for (let i = snapshots.length - 2; i >= 0; i -= 1) {
+    const s = snapshots[i];
+    if (!s || s.id === currentSnapshot.id) continue;
+    if (s.date && currentSnapshot.date && s.date === currentSnapshot.date) continue;
+    if (prevSnapshot.date && s.date && s.date !== prevSnapshot.date) continue;
+    if (Array.isArray(s.actions?.start) && s.actions.start.length > 0) {
+      adherenceCandidates.push(s);
     }
+  }
+  let adherenceBaseSnapshot = prevSnapshot;
+  let adherence = null;
+  if (adherenceCandidates.length > 0) {
+    const scored = adherenceCandidates.map((snapshot, idx) => ({
+      snapshot,
+      idx,
+      adherence: computeStartAdherence(snapshot, currentSnapshot),
+    }));
+    scored.sort((a, b) => {
+      const matchedDelta = (b.adherence?.matched || 0) - (a.adherence?.matched || 0);
+      if (matchedDelta !== 0) return matchedDelta;
+      const countDelta =
+        (b.adherence?.recommendedCount || 0) - (a.adherence?.recommendedCount || 0);
+      if (countDelta !== 0) return countDelta;
+      return a.idx - b.idx;
+    });
+    adherenceBaseSnapshot = scored[0].snapshot;
+    adherence = scored[0].adherence;
+  } else {
+    adherence = computeStartAdherence(adherenceBaseSnapshot, currentSnapshot);
   }
 
   const lines = [];
-  const adherence = computeStartAdherence(adherenceBaseSnapshot, currentSnapshot);
   if (adherence && adherence.recommendedCount > 0) {
     lines.push(
       `- Lineup adherence: ${adherence.matched}/${adherence.recommendedCount} recommended starts used`
     );
+    if (adherenceCandidates.length > 1) {
+      lines.push(
+        `- Adherence baseline: ${adherenceBaseSnapshot.id} (best match among ${adherenceCandidates.length} recommendation runs on ${adherenceBaseSnapshot.date})`
+      );
+    }
     if (adherence.matched < adherence.recommendedCount) {
       const recommended = adherenceBaseSnapshot.actions?.start || [];
       const prevByName = new Map((adherenceBaseSnapshot.roster || []).map((p) => [p.name, p]));
@@ -6153,7 +6176,7 @@ async function finalizeAndLogRun({
   const snapshotsLog = [...snapshotsBefore, snapshot];
 
   const effectivenessLines = buildEffectivenessSummary(snapshotsLog, snapshot);
-  console.log(cYellow("Effectiveness since last run:"));
+  console.log(cYellow("Effectiveness since prior day:"));
   if (effectivenessLines && effectivenessLines.length > 0) {
     effectivenessLines.forEach((line) => {
       const trimmed = line.startsWith("- ") ? line.slice(2) : line;

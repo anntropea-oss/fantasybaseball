@@ -29,3 +29,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/scripts/run-daily.sh`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: Pushed `main` and polled `https://anntropea-oss.github.io/fantasybaseball/`; live HTML now includes `dashboard-data.json`, window `2026-04-11` to `2026-05-09`, and update timestamp `2026-05-09T14:35:45.926Z`.
+
+## [2026-05-10 10:01] Clarify Lineup Adherence Baseline
+- Problem: Today's output reported `0/3` lineup adherence even though an earlier May 9 recommendation run had been followed, making it look like no recommended starts were used.
+- Root Cause: Multiple `recommend` runs happened on May 9. The adherence summary used the latest prior-day recommendation run as the baseline, even if an earlier same-day run better matched the actual lineup changes.
+- Solution: Changed the effectiveness summary to evaluate all recommendation runs from the prior date and choose the best-matching adherence baseline, and print the selected baseline snapshot when there were multiple runs. Renamed the section from `Effectiveness since last run` to `Effectiveness since prior day`.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` now prints the adherence baseline snapshot instead of silently scoring the latest prior-day run.
