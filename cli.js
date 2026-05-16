@@ -202,6 +202,16 @@ function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
   );
 }
 
+function benchmarkPromotionCandidate() {
+  const daily = readJsonFileSafe(MODEL_BENCHMARK_DAILY_REPORT);
+  const allRuns = readJsonFileSafe(MODEL_BENCHMARK_ALL_REPORT);
+  const best = benchmarkBestChallenger(daily);
+  if (!best || !benchmarkQualifiesAsChampion(daily, allRuns, best.method)) {
+    return null;
+  }
+  return best.method;
+}
+
 function formatSigned(value, digits = 3) {
   const n = toNumber(value) ?? 0;
   return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}`;
@@ -225,7 +235,7 @@ function benchmarkModelStatusLines() {
 
   lines.push(
     promoted
-      ? `Champion review: ${best.method} qualifies as a challenger promotion candidate.`
+      ? `Champion: ${best.method} is active for target selection.`
       : "Champion: current heuristic remains production default."
   );
   if (dailyBaseline) {
@@ -1233,6 +1243,7 @@ function buildSnapshotFeatures({
   leagueSettingsFile,
   resolvedCategories,
   focusKeys,
+  targetModel,
   pointInfoByKey,
   categoryNextGaps,
   rosterMappedPlayers,
@@ -1339,6 +1350,7 @@ function buildSnapshotFeatures({
       })),
     },
     recommendationContext: {
+      targetModel: targetModel || "baseline",
       counts: {
         addBatting: actions.addBatting?.length || 0,
         addPitching: actions.addPitching?.length || 0,
@@ -2425,45 +2437,74 @@ function inferActions(prevSnapshot, currentSnapshot) {
   };
 }
 
+function isReadyForEffectiveness(baseSnapshot, currentSnapshot) {
+  if (!baseSnapshot || !currentSnapshot) return false;
+  if (baseSnapshot.id === currentSnapshot.id) return false;
+  if (baseSnapshot.date && currentSnapshot.date) {
+    const baseDate = parseIsoDate(baseSnapshot.date);
+    const currentDate = parseIsoDate(currentSnapshot.date);
+    if (baseDate && currentDate) {
+      return daysBetweenUtc(baseDate, currentDate) >= EFFECTIVENESS_DELAY_DAYS;
+    }
+  }
+  return true;
+}
+
+function findLatestReadySnapshot({ snapshots, currentSnapshot, lastEvaluatedSnapshotId }) {
+  if (!Array.isArray(snapshots) || snapshots.length < 2) return null;
+  const lastEvaluatedIndex = lastEvaluatedSnapshotId
+    ? snapshots.findIndex((snap) => snap.id === lastEvaluatedSnapshotId)
+    : -1;
+  for (let i = snapshots.length - 1; i >= 0; i -= 1) {
+    const snapshot = snapshots[i];
+    if (!snapshot || snapshot.id === currentSnapshot.id) continue;
+    if (lastEvaluatedIndex >= 0 && i <= lastEvaluatedIndex) continue;
+    if (!isReadyForEffectiveness(snapshot, currentSnapshot)) continue;
+    return snapshot;
+  }
+  return null;
+}
+
 function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
   const safeActions = Array.isArray(actions) ? actions : [];
+  const snapshotMap = new Map(snapshots.map((snap) => [snap.id, snap]));
   const lastEvaluatedId = learning.lastEvaluatedActionId;
   let pending = null;
-  for (let i = safeActions.length - 1; i >= 0; i -= 1) {
+  const lastEvaluatedActionIndex = lastEvaluatedId
+    ? safeActions.findIndex((action) => action.id === lastEvaluatedId)
+    : -1;
+  for (let i = safeActions.length - 1; i > lastEvaluatedActionIndex; i -= 1) {
     const action = safeActions[i];
     if (
       action.id !== lastEvaluatedId &&
       action.snapshotId &&
       action.snapshotId !== currentSnapshot.id
     ) {
+      const actionSnapshot = snapshotMap.get(action.snapshotId);
+      if (!isReadyForEffectiveness(actionSnapshot, currentSnapshot)) continue;
       pending = action;
       break;
     }
   }
 
   let source = "manual";
+  const readySnapshot = findLatestReadySnapshot({
+    snapshots,
+    currentSnapshot,
+    lastEvaluatedSnapshotId: learning.lastEvaluatedSnapshotId,
+  });
   if (!pending) {
-    const prevSnapshot = snapshots.length >= 2 ? snapshots[snapshots.length - 2] : null;
-    if (
-      prevSnapshot &&
-      learning.lastEvaluatedSnapshotId !== prevSnapshot.id &&
-      prevSnapshot.id !== currentSnapshot.id
-    ) {
-      pending = inferActions(prevSnapshot, currentSnapshot);
+    if (readySnapshot) {
+      pending = inferActions(readySnapshot, currentSnapshot);
       source = "inferred";
     }
   }
   if (!pending) {
-    const prevSnapshot = snapshots.length >= 2 ? snapshots[snapshots.length - 2] : null;
-    if (
-      prevSnapshot &&
-      learning.lastEvaluatedSnapshotId !== prevSnapshot.id &&
-      prevSnapshot.id !== currentSnapshot.id
-    ) {
+    if (readySnapshot) {
       pending = {
         id: `targets-${currentSnapshot.id}`,
         date: currentSnapshot.date,
-        snapshotId: prevSnapshot.id,
+        snapshotId: readySnapshot.id,
         adds: [],
         drops: [],
         starts: [],
@@ -2476,19 +2517,9 @@ function evaluateActions({ learning, actions, snapshots, currentSnapshot }) {
   }
   if (!pending) return learning;
 
-  const snapshotMap = new Map(snapshots.map((snap) => [snap.id, snap]));
   const baseSnapshot = snapshotMap.get(pending.snapshotId);
   if (!baseSnapshot) return learning;
-  if (baseSnapshot.date && currentSnapshot.date) {
-    const baseDate = parseIsoDate(baseSnapshot.date);
-    const currentDate = parseIsoDate(currentSnapshot.date);
-    if (baseDate && currentDate) {
-      const diffDays = daysBetweenUtc(baseDate, currentDate);
-      if (diffDays < EFFECTIVENESS_DELAY_DAYS) {
-        return learning;
-      }
-    }
-  }
+  if (!isReadyForEffectiveness(baseSnapshot, currentSnapshot)) return learning;
 
   const currentMap = new Map(
     currentSnapshot.categories.map((cat) => [cat.key, cat])
@@ -3884,8 +3915,10 @@ async function recommend({ snapshotOnly = false } = {}) {
   const rankedCategories = resolvedCategories
     .filter((stat) => stat.rank !== null && !Number.isNaN(stat.rank))
     .sort((a, b) => b.rank - a.rank);
+  const weakestCategoryKeys = rankedCategories.slice(0, 3).map((cat) => cat.key);
 
   const learning = loadLearning();
+  const targetModel = benchmarkPromotionCandidate() || "baseline";
   const efficiencyScores = buildEfficiencyScores(
     resolvedCategories,
     teamMetrics,
@@ -4146,9 +4179,16 @@ async function recommend({ snapshotOnly = false } = {}) {
   }
 
   const primaryTargetKeys =
-    pointGainTargets.length > 0 ? pointGainTargets : worstCategoryKeys;
+    targetModel === "weakest"
+      ? weakestCategoryKeys
+      : pointGainTargets.length > 0
+        ? pointGainTargets
+        : worstCategoryKeys;
   targetKeys = [...primaryTargetKeys];
-  const focusKeys = [...new Set([...primaryTargetKeys, ...bestValueTargets])];
+  const focusKeys =
+    targetModel === "weakest"
+      ? [...new Set(primaryTargetKeys)]
+      : [...new Set([...primaryTargetKeys, ...bestValueTargets])];
   const needsSaves = focusKeys.includes("SV");
   const currentSaves = toNumber(
     resolvedCategories.find((cat) => cat.key === "SV")?.value
@@ -4158,7 +4198,9 @@ async function recommend({ snapshotOnly = false } = {}) {
   if (targetKeys.length > 0) {
     console.log(
       cYellow(
-        pointGainTargets.length > 0
+        targetModel === "weakest"
+          ? "Targets (champion: weakest categories):"
+          : pointGainTargets.length > 0
           ? "Targets (closest point gains):"
           : "Targets (lowest ranks):"
       )
@@ -4292,6 +4334,7 @@ async function recommend({ snapshotOnly = false } = {}) {
       leagueSettingsFile,
       resolvedCategories,
       focusKeys,
+      targetModel,
       pointInfoByKey,
       categoryNextGaps,
       rosterMappedPlayers,
@@ -5399,6 +5442,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     leagueSettingsFile,
     resolvedCategories,
     focusKeys,
+    targetModel,
     pointInfoByKey,
     categoryNextGaps,
     rosterMappedPlayers,

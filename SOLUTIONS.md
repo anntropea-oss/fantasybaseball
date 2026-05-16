@@ -45,3 +45,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/config.example.json`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/config.json`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; rerunning `node cli.js recommend --no-dashboard` with Matt Brash blocked no longer recommends him and reports no add cleared upgrade thresholds.
+
+## [2026-05-16 12:24] Refresh Stale Learning And Apply Champion Target Model
+- Problem: Model learning was stuck on snapshot `2026-05-03T15:36:26.911Z` despite daily recommendation runs through May 16, and benchmark output could identify `weakest` as a promotion candidate without `recommend` actually using it for target selection.
+- Root Cause: `evaluateActions` only inspected the immediately previous snapshot and returned unchanged when that snapshot was less than the two-day effectiveness delay, so it never searched older eligible snapshots. Separately, benchmark promotion status was only printed and recorded, not wired into the live target-selection path.
+- Solution: Added readiness helpers so action evaluation selects the newest unevaluated snapshot/action old enough to judge, promoted qualified benchmark challengers into target selection, and recorded the active `targetModel` in snapshot feature inputs. Documented that qualified challengers are used by `recommend`.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` advanced `logs/learning.json` to `lastEvaluatedSnapshotId` `2026-05-14T14:36:32.414Z`; refreshed `node cli.js benchmark` showed `weakest` beating baseline on daily and all-runs checks; a final `node cli.js recommend --no-dashboard` printed `Champion: weakest is active for target selection` and wrote `featureInputs.recommendationContext.targetModel: "weakest"`.
