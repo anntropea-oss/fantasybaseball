@@ -158,6 +158,22 @@ team standings discoverable from the authenticated Yahoo account. Useful flags:
   ]
 }
 ```
+- Players can be excluded from add recommendations with `doNotAdd` or
+  `unavailableAdds`. Use `unavailableAdds` for Yahoo UI blockers such as waiver
+  periods that are not visible in the normal free-agent API response:
+
+```json
+{
+  "doNotAdd": ["Example Player"],
+  "unavailableAdds": [
+    {
+      "playerName": "Matt Brash",
+      "reason": "Yahoo UI says waiver period must end before add is available.",
+      "unavailableUntil": "2026-05-18"
+    }
+  ]
+}
+```
 - Historical backfill tables are stored in `logs/fantasy.db`:
   `historical_player_pools`, `historical_players`,
   `historical_player_stats`, `historical_leagues`, and

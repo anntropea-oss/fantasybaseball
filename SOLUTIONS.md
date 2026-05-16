@@ -37,3 +37,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` now prints the adherence baseline snapshot instead of silently scoring the latest prior-day run.
+
+## [2026-05-16 12:14] Block Waiver-Unavailable Add Recommendations
+- Problem: The recommender suggested adding Matt Brash, but Yahoo UI would not allow the add until his waiver period ends.
+- Root Cause: The Yahoo free-agent player list used by the CLI can expose a player as addable without including the UI-level waiver/claim restriction in the normal player payload.
+- Solution: Added configurable add exclusions via `doNotAdd` and `unavailableAdds`, filtered blocked players out before add recommendations are ranked, documented the config, and locally marked Matt Brash as unavailable until the waiver clears.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/config.example.json`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/config.json`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; rerunning `node cli.js recommend --no-dashboard` with Matt Brash blocked no longer recommends him and reports no add cleared upgrade thresholds.

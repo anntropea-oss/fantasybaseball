@@ -1793,6 +1793,33 @@ function isDropBlockedByDoNotDrop(config, doNotDrop, player) {
   return !getAllowedProtectedInjuryDropReview(config, player);
 }
 
+function addBlockMatchesPlayer(block, player) {
+  const blockName = normalizeNameKey(block?.playerName ?? block?.name ?? block);
+  const playerName = normalizeNameKey(player?.name);
+  if (blockName && playerName && blockName === playerName) return true;
+  const blockPlayerKey = String(block?.playerKey || "").trim();
+  return Boolean(blockPlayerKey && player?.playerKey && blockPlayerKey === player.playerKey);
+}
+
+function addBlockIsActive(block) {
+  if (!block || typeof block !== "object") return true;
+  const until = parseIsoDate(String(block.unavailableUntil || block.until || "").slice(0, 10));
+  if (!until) return true;
+  const today = parseIsoDate(todayDateString());
+  return !today || daysBetweenUtc(today, until) >= 0;
+}
+
+function getAddBlock(config, player) {
+  const blocks = [
+    ...(Array.isArray(config?.doNotAdd) ? config.doNotAdd : []),
+    ...(Array.isArray(config?.unavailableAdds) ? config.unavailableAdds : []),
+  ];
+  return (
+    blocks.find((block) => addBlockMatchesPlayer(block, player) && addBlockIsActive(block)) ||
+    null
+  );
+}
+
 function buildProtectedInjuryReviewStates(config, doNotDrop, roster) {
   return (Array.isArray(roster) ? roster : [])
     .filter(
@@ -4178,6 +4205,7 @@ async function recommend({ snapshotOnly = false } = {}) {
   let dropMessage = null;
   let dropLines = [];
   let dropSuggestions = [];
+  let blockedAddCandidates = [];
   let dropDiagnostics = {
     addCandidateCount: 0,
     safeDropCandidates: 0,
@@ -4186,6 +4214,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     protectedInjuryReviews: [],
     staleProtectedInjuryReviews: [],
     blockedProtectedDrops: [],
+    blockedAddCandidates: [],
     noAddReason: null,
     noDropReason: null,
   };
@@ -4336,7 +4365,7 @@ async function recommend({ snapshotOnly = false } = {}) {
       };
 
       const basePlayers = positionFilter ? players : players.filter(filterByNeed);
-      const suggestedPlayers = basePlayers.map((player) => ({
+      const allSuggestedPlayers = basePlayers.map((player) => ({
           player,
           name: extractPlayerName(player),
           positions: extractPlayerPositions(player),
@@ -4344,6 +4373,29 @@ async function recommend({ snapshotOnly = false } = {}) {
           rank: extractPlayerRank(player),
           playerKey: extractPlayerKey(player),
         }));
+      blockedAddCandidates = allSuggestedPlayers
+        .map((item) => ({ item, block: getAddBlock(config, item) }))
+        .filter(({ block }) => block)
+        .map(({ item, block }) => ({
+          name: item.name,
+          playerKey: item.playerKey || null,
+          positions: item.positions || [],
+          reason:
+            typeof block === "object"
+              ? block.reason || "Configured add block."
+              : "Configured add block.",
+          unavailableUntil:
+            typeof block === "object"
+              ? block.unavailableUntil || block.until || null
+              : null,
+        }));
+      const suggestedPlayers = allSuggestedPlayers.filter(
+        (item) => !getAddBlock(config, item)
+      );
+      dropDiagnostics = {
+        ...dropDiagnostics,
+        blockedAddCandidates,
+      };
       if (suggestedPlayers.length > 0) {
         if (positionFilter) {
           const positionCandidates = suggestedPlayers.filter((item) =>
@@ -4848,6 +4900,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     ...dropDiagnostics,
     addCandidateCount: allAddCandidates.length,
     safeDropCandidates: dropSuggestions.length,
+    blockedAddCandidates,
   };
   const addKeys = allAddCandidates.map((candidate) => candidate.playerKey).filter(Boolean);
   if (addKeys.length > 0) {
