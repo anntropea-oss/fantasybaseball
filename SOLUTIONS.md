@@ -53,3 +53,19 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` advanced `logs/learning.json` to `lastEvaluatedSnapshotId` `2026-05-14T14:36:32.414Z`; refreshed `node cli.js benchmark` showed `weakest` beating baseline on daily and all-runs checks; a final `node cli.js recommend --no-dashboard` printed `Champion: weakest is active for target selection` and wrote `featureInputs.recommendationContext.targetModel: "weakest"`.
+
+## [2026-05-22 08:00] Start Recommendations Use Roster Order
+- Problem: Start/bench recommendations repeatedly rotate through the same small pitcher group and can look essentially the same day to day even when daily baseball context should matter.
+- Root Cause: The start selection flow filters bench players by whether they match the active batting/pitching target type, but then takes the first three remaining candidates from roster order. It does not rank bench candidates by probable start status, opponent, game day, target-stat score, projected innings, or ratio risk before selecting starts.
+- Solution: Resolved by the later schedule-aware start ranking entry, which replaced roster-order selection with MLB schedule/probable-starter scoring and an upgrade threshold.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`, `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`
+- Status: Resolved
+- Verification: Reviewed `cli.js` start selection logic and recent snapshots from May 15 through May 22; later verification confirmed `node cli.js recommend --no-dashboard` now ranks starts using MLB schedule diagnostics instead of unranked roster-order selection.
+
+## [2026-05-22 09:13] Schedule-Aware Start Ranking
+- Problem: Start/bench recommendations were selected by roster order after broad target filtering, and the first schedule-aware implementation could not match MLB schedule context because the main `recommend` roster mapping did not carry Yahoo `editorial_team_abbr` into mapped players. Projected K also showed as `0.0` because support stat `IP` is not a scoring category and was missing from the category stat-id map.
+- Root Cause: The start flow lacked a ranked start score and did not preserve team metadata in the non-snapshot roster mapping path. Without team abbreviations, MLB probable-starter and opponent matching returned no scheduled game for real roster players; without standard Yahoo stat-id fallbacks, non-scoring support stats could not feed projections.
+- Solution: Added Yahoo team extraction, MLB Stats API schedule/probable-starter lookup, start scores using probable starter/game status, projected IP/K, win-proxy, opponent record, ERA/WHIP risk, standard Yahoo stat-id fallbacks for support stats, and a minimum upgrade threshold over the active player to be benched. Added start diagnostics to snapshots and documented the behavior.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` now writes `featureInputs.recommendationContext.startDiagnostics` with MLB schedule scores and recommends schedule-aware starts led by Michael Soroka instead of taking the first three bench pitchers from roster order; projected K is populated from IP/K stat-id fallbacks.

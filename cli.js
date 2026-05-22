@@ -48,6 +48,7 @@ const MAX_ARCHETYPE_KEYS = 120;
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
 const FANTASY_API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2";
+const MLB_STATS_API_BASE = "https://statsapi.mlb.com/api/v1";
 
 const emitWarning = process.emitWarning.bind(process);
 process.emitWarning = (warning, ...args) => {
@@ -1201,6 +1202,16 @@ function extractPlayerId(player) {
   return id.toString();
 }
 
+function extractPlayerTeamAbbr(player) {
+  const abbr = findFirstValueByKey(player, "editorial_team_abbr");
+  return typeof abbr === "string" ? abbr.toUpperCase() : null;
+}
+
+function extractPlayerTeamName(player) {
+  const name = findFirstValueByKey(player, "editorial_team_full_name");
+  return typeof name === "string" ? name : null;
+}
+
 function extractPrimarySelectedPosition(selected) {
   if (!selected || selected.length === 0) return null;
   return selected[0] || null;
@@ -1222,6 +1233,8 @@ function buildRosterState(rosterPlayers) {
         selectedPrimary: extractPrimarySelectedPosition(selected),
         positions,
         status,
+        teamAbbr: extractPlayerTeamAbbr(player),
+        teamName: extractPlayerTeamName(player),
         isPitcher: isPitcherPositions(positions),
         isIL: isILPosition(selected) || isILStatus(status),
       };
@@ -1244,6 +1257,8 @@ function buildSnapshotFeatures({
   resolvedCategories,
   focusKeys,
   targetModel,
+  startContext,
+  startDiagnostics,
   pointInfoByKey,
   categoryNextGaps,
   rosterMappedPlayers,
@@ -1306,7 +1321,7 @@ function buildSnapshotFeatures({
       yahooRoster: roster.length > 0,
       yahooPlayerRanks: roster.some((p) => p.rank !== null && p.rank !== undefined),
       yahooPlayerStats: roster.some((p) => p.stats && p.stats.size > 0),
-      externalSchedule: false,
+      externalSchedule: !!startContext?.scheduleAvailable,
       externalProjections: false,
       externalNews: false,
     },
@@ -1330,7 +1345,8 @@ function buildSnapshotFeatures({
       positions: p.positions || [],
     })),
     scheduleProxy: {
-      source: "lineup-slots",
+      source: startContext?.scheduleAvailable ? "mlb-statsapi-schedule" : "lineup-slots",
+      dateRange: startContext?.dateRange || null,
       rosterChanges: leagueSettingsFile?.rosterChanges || null,
       activePitchers: active
         .filter((p) => p.isPitcher)
@@ -1347,6 +1363,8 @@ function buildSnapshotFeatures({
         startSlot: p.startSlot || null,
         benchName: p.benchName || null,
         benchSlot: p.benchSlot || null,
+        score: toNumber(p.startScore),
+        reasons: p.startReasons || [],
       })),
     },
     recommendationContext: {
@@ -1366,6 +1384,7 @@ function buildSnapshotFeatures({
       },
       protectedInjuryReviews: dropDiagnostics?.protectedInjuryReviews || [],
       dropDiagnostics: dropDiagnostics || null,
+      startDiagnostics: startDiagnostics || null,
       addDetails: projectedAdds.map((d) => ({
         playerKey: d.playerKey || null,
         playerName: d.playerName || null,
@@ -1511,11 +1530,20 @@ function preferredStartSlots(player) {
 function pickWorstStarter(starters, statKeys, statIdByKey) {
   if (!starters || starters.length === 0) return null;
   const scored = starters.map((p) => {
+    const startScore = toNumber(p.startScore);
     const score = computeStatScore(p.stats, statKeys, statIdByKey);
     const rank = p.rank === null || p.rank === undefined ? 9999 : p.rank;
-    return { p, score: score === null || score === undefined ? Number.NEGATIVE_INFINITY : score, rank };
+    return {
+      p,
+      startScore,
+      score: score === null || score === undefined ? Number.NEGATIVE_INFINITY : score,
+      rank,
+    };
   });
   scored.sort((a, b) => {
+    if (a.startScore !== null && b.startScore !== null && a.startScore !== b.startScore) {
+      return a.startScore - b.startScore;
+    }
     if (a.score !== b.score) return a.score - b.score; // lower = worse
     return b.rank - a.rank; // higher rank number = worse
   });
@@ -1543,6 +1571,7 @@ function buildStartPlans({
   const openSlots = computeLineupOpenSlots(rosterPositions, roster);
   const remainingOpenSlots = openSlots.slice();
   const usedBenchKeys = new Set();
+  const minStartUpgrade = 1.5;
 
   const focusSet = new Set(Array.isArray(focusKeys) ? focusKeys : []);
   const statKeysFor = (isPitcher) => {
@@ -1575,7 +1604,14 @@ function buildStartPlans({
 
   const pickBenchForSlot = (slot, player) => {
     const list = startersBySlot.get(slot) || [];
-    const filtered = list.filter((p) => p.playerKey && !usedBenchKeys.has(p.playerKey));
+    const playerScore = toNumber(player.startScore);
+    const filtered = list.filter((p) => {
+      if (!p.playerKey || usedBenchKeys.has(p.playerKey)) return false;
+      if (isUnavailableStatus(p.status) || p.isIL) return true;
+      const benchScore = toNumber(p.startScore);
+      if (playerScore === null || benchScore === null) return true;
+      return playerScore - benchScore >= minStartUpgrade;
+    });
     if (filtered.length === 0) return null;
     const bench = pickWorstStarter(filtered, statKeysFor(player.isPitcher), statIdByKey);
     if (bench?.playerKey) usedBenchKeys.add(bench.playerKey);
@@ -2814,6 +2850,280 @@ function computeStatScore(statsMap, statKeys, statIdByKey) {
     score += isLowerBetter(key, key) ? -value : value;
   });
   return hasStat ? score : null;
+}
+
+function clampNumber(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
+
+function normalizeLookupText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function normalizeMlbTeamAbbr(abbr) {
+  const raw = String(abbr || "").trim().toUpperCase();
+  const aliases = {
+    ARI: "AZ",
+    CWS: "CHW",
+    KCR: "KC",
+    SFG: "SF",
+    TBR: "TB",
+    WSH: "WSH",
+    WAS: "WSH",
+  };
+  return aliases[raw] || raw;
+}
+
+function baseballInningsToDecimal(value) {
+  const n = toNumber(value);
+  if (n === null) return null;
+  const whole = Math.trunc(n);
+  const tenths = Math.round((n - whole) * 10);
+  if (tenths <= 0) return whole;
+  if (tenths === 1) return whole + 1 / 3;
+  if (tenths === 2) return whole + 2 / 3;
+  return n;
+}
+
+function statValueForKey(player, key, statIdByKey) {
+  const fallbackStatIds = {
+    IP: "50",
+    W: "28",
+    SV: "32",
+    K: "42",
+    ERA: "26",
+    WHIP: "27",
+    R: "7",
+    HR: "12",
+    RBI: "13",
+    SB: "16",
+    AVG: "3",
+  };
+  const statId = statIdByKey.get(key) || fallbackStatIds[key];
+  if (!statId || !player?.stats || !(player.stats instanceof Map)) return null;
+  return toNumber(player.stats.get(statId));
+}
+
+function formatStartScore(value) {
+  const n = toNumber(value);
+  if (n === null) return null;
+  return n.toFixed(1);
+}
+
+async function fetchMlbScheduleContext({ startDate, endDate }) {
+  const empty = {
+    scheduleAvailable: false,
+    dateRange: { startDate, endDate },
+    teams: new Map(),
+    probablePitchers: new Map(),
+  };
+  try {
+    const params = new URLSearchParams({
+      sportId: "1",
+      startDate,
+      endDate,
+      hydrate: "probablePitcher,team,linescore",
+    });
+    const response = await fetch(`${MLB_STATS_API_BASE}/schedule?${params.toString()}`);
+    if (!response.ok) return empty;
+    const data = await response.json();
+    const teams = new Map();
+    const probablePitchers = new Map();
+    (data.dates || []).forEach((dateRow) => {
+      (dateRow.games || []).forEach((game) => {
+        const officialDate = game.officialDate || dateRow.date || null;
+        ["home", "away"].forEach((side) => {
+          const otherSide = side === "home" ? "away" : "home";
+          const entry = game.teams?.[side] || {};
+          const oppEntry = game.teams?.[otherSide] || {};
+          const team = entry.team || {};
+          const opponent = oppEntry.team || {};
+          const teamAbbr = normalizeMlbTeamAbbr(team.abbreviation || team.fileCode);
+          if (!teamAbbr) return;
+          const oppPct = toNumber(oppEntry.leagueRecord?.pct) ?? 0.5;
+          const teamPct = toNumber(entry.leagueRecord?.pct) ?? 0.5;
+          const probableName = entry.probablePitcher?.fullName || null;
+          const teamGame = {
+            date: officialDate,
+            gameDate: game.gameDate || null,
+            side,
+            home: side === "home",
+            opponentAbbr: normalizeMlbTeamAbbr(opponent.abbreviation || opponent.fileCode),
+            opponentName: opponent.name || null,
+            opponentPct: oppPct,
+            teamPct,
+            probablePitcherName: probableName,
+            probablePitcherId: entry.probablePitcher?.id || null,
+            status: game.status?.detailedState || game.status?.abstractGameState || null,
+          };
+          if (!teams.has(teamAbbr)) teams.set(teamAbbr, []);
+          teams.get(teamAbbr).push(teamGame);
+          if (probableName) {
+            probablePitchers.set(
+              `${teamAbbr}|${normalizeLookupText(probableName)}`,
+              teamGame
+            );
+          }
+        });
+      });
+    });
+    return {
+      scheduleAvailable: teams.size > 0,
+      dateRange: { startDate, endDate },
+      teams,
+      probablePitchers,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+function scheduleInfoForPlayer(player, scheduleContext) {
+  const teamAbbr = normalizeMlbTeamAbbr(player?.teamAbbr);
+  if (!teamAbbr || !scheduleContext?.teams) {
+    return { teamAbbr, games: [], probableGame: null, nextGame: null };
+  }
+  const games = (scheduleContext.teams.get(teamAbbr) || []).slice().sort((a, b) =>
+    String(a.date || "").localeCompare(String(b.date || ""))
+  );
+  const nameKey = `${teamAbbr}|${normalizeLookupText(player?.name)}`;
+  const probableGame = scheduleContext.probablePitchers?.get(nameKey) || null;
+  return { teamAbbr, games, probableGame, nextGame: games[0] || null };
+}
+
+function buildStartScore({ player, focusKeys, statIdByKey, scheduleContext }) {
+  const focusSet = new Set(Array.isArray(focusKeys) ? focusKeys : []);
+  const info = scheduleInfoForPlayer(player, scheduleContext);
+  const isPitcher = !!player?.isPitcher;
+  const isRpOnly =
+    isPitcher &&
+    Array.isArray(player.positions) &&
+    player.positions.includes("RP") &&
+    !player.positions.includes("SP");
+  const probableGame = info.probableGame;
+  const nextGame = info.nextGame;
+  const hasGame = !!nextGame;
+  const isProbable = !!probableGame;
+  const game = probableGame || nextGame || null;
+  const daysOut =
+    game?.date && scheduleContext?.dateRange?.startDate
+      ? daysBetweenUtc(parseIsoDate(scheduleContext.dateRange.startDate), parseIsoDate(game.date))
+      : null;
+  const teamPct = toNumber(game?.teamPct) ?? 0.5;
+  const opponentPct = toNumber(game?.opponentPct) ?? 0.5;
+  const winProxy = clampNumber(0.5 + (teamPct - opponentPct) * 0.6 + (game?.home ? 0.04 : 0), 0.2, 0.8);
+
+  const ip = baseballInningsToDecimal(statValueForKey(player, "IP", statIdByKey));
+  const k = statValueForKey(player, "K", statIdByKey) ?? 0;
+  const era = statValueForKey(player, "ERA", statIdByKey);
+  const whip = statValueForKey(player, "WHIP", statIdByKey);
+  const kPerIp = ip && ip > 0 ? k / ip : 0;
+  const projectedIp = isProbable ? 5.2 : isPitcher && hasGame ? (isRpOnly ? 1 : 1.5) : 0;
+  const projectedK = projectedIp * kPerIp;
+  const reasons = [];
+  let score = 0;
+
+  if (isPitcher) {
+    if (isProbable) {
+      score += daysOut === 0 ? 30 : 22;
+      reasons.push(`probable starter ${game.date}`);
+    } else if (hasGame && isRpOnly) {
+      score += daysOut === 0 ? 8 : 5;
+      reasons.push(`reliever has ${game.date} game`);
+    } else if (hasGame) {
+      score += 2;
+      reasons.push(`team has ${game.date} game but not listed probable`);
+    } else {
+      score -= 8;
+      reasons.push("no scheduled game found");
+    }
+
+    if (focusSet.has("K")) {
+      score += projectedK * 1.5;
+      reasons.push(`projected K ${projectedK.toFixed(1)}`);
+    }
+    if (focusSet.has("W")) {
+      const winScore = (isProbable ? 8 : 2) * winProxy;
+      score += winScore;
+      reasons.push(`win proxy ${(winProxy * 100).toFixed(0)}%`);
+    }
+    if (focusSet.has("ERA") || focusSet.has("WHIP")) {
+      if (era !== null) score += era <= 3.5 ? 3 : era >= 4.8 ? -4 : 0;
+      if (whip !== null) score += whip <= 1.15 ? 3 : whip >= 1.35 ? -4 : 0;
+    } else {
+      if (era !== null && era >= 5) score -= 3;
+      if (whip !== null && whip >= 1.4) score -= 3;
+    }
+    score += (0.5 - opponentPct) * 4;
+    reasons.push(`opponent ${game?.opponentAbbr || "unknown"} pct ${opponentPct.toFixed(3)}`);
+    if (era !== null || whip !== null) {
+      reasons.push(`risk ERA ${era ?? "n/a"}, WHIP ${whip ?? "n/a"}`);
+    }
+  } else {
+    if (hasGame) {
+      score += daysOut === 0 ? 8 : 5;
+      reasons.push(`team has ${game.date} game`);
+    } else {
+      score -= 6;
+      reasons.push("no scheduled game found");
+    }
+    const statScore = computeStatScore(player.stats, [...focusSet], statIdByKey);
+    if (statScore !== null) {
+      score += statScore * 0.1;
+      reasons.push(`target stat score ${statScore.toFixed(1)}`);
+    }
+  }
+
+  const rank = player.rank === null || player.rank === undefined ? null : Number(player.rank);
+  if (rank !== null && Number.isFinite(rank)) {
+    score += Math.max(0, (250 - rank) / 100);
+  }
+
+  return {
+    score,
+    reasons,
+    schedule: {
+      teamAbbr: info.teamAbbr || null,
+      opponentAbbr: game?.opponentAbbr || null,
+      opponentName: game?.opponentName || null,
+      date: game?.date || null,
+      probable: isProbable,
+      winProxy,
+      projectedIp,
+      projectedK,
+      era,
+      whip,
+    },
+  };
+}
+
+function rankStartCandidates({ candidates, focusKeys, statIdByKey, scheduleContext }) {
+  return (candidates || [])
+    .map((player) => {
+      const startModel = buildStartScore({ player, focusKeys, statIdByKey, scheduleContext });
+      return {
+        ...player,
+        startScore: startModel.score,
+        startReasons: startModel.reasons,
+        startSchedule: startModel.schedule,
+      };
+    })
+    .sort((a, b) => {
+      if ((b.startScore ?? 0) !== (a.startScore ?? 0)) {
+        return (b.startScore ?? 0) - (a.startScore ?? 0);
+      }
+      if (a.rank === null && b.rank === null) return 0;
+      if (a.rank === null) return 1;
+      if (b.rank === null) return -1;
+      return a.rank - b.rank;
+    });
 }
 
 function safeMeanStd(values) {
@@ -4241,6 +4551,11 @@ async function recommend({ snapshotOnly = false } = {}) {
   let pitchingFocusKeys = [];
   let startSelections = [];
   let startPlans = [];
+  let startContext = {
+    scheduleAvailable: false,
+    dateRange: null,
+  };
+  let startDiagnostics = null;
   let startLabel = null;
   let startMessage = null;
   let dropHeader = null;
@@ -4299,6 +4614,9 @@ async function recommend({ snapshotOnly = false } = {}) {
           selectedPrimary: extractPrimarySelectedPosition(selected),
           rank,
           playerKey,
+          playerId: extractPlayerId(player),
+          teamAbbr: extractPlayerTeamAbbr(player),
+          teamName: extractPlayerTeamName(player),
           stats,
           status,
           isPitcher: isPitcherPositions(positions),
@@ -4335,6 +4653,8 @@ async function recommend({ snapshotOnly = false } = {}) {
       resolvedCategories,
       focusKeys,
       targetModel,
+      startContext,
+      startDiagnostics,
       pointInfoByKey,
       categoryNextGaps,
       rosterMappedPlayers,
@@ -4525,6 +4845,9 @@ async function recommend({ snapshotOnly = false } = {}) {
           selectedPrimary: extractPrimarySelectedPosition(selected),
           rank,
           playerKey,
+          playerId: extractPlayerId(player),
+          teamAbbr: extractPlayerTeamAbbr(player),
+          teamName: extractPlayerTeamName(player),
           stats,
           status,
           isPitcher: isPitcherPositions(positions),
@@ -4586,8 +4909,39 @@ async function recommend({ snapshotOnly = false } = {}) {
         allBenchPlayers.forEach((player, index) => {
           allBenchPlayers[index] = applyStats(player);
         });
+        mappedPlayers.forEach((player) => {
+          if (statsResult.statsByKey.has(player.playerKey)) {
+            player.stats = statsResult.statsByKey.get(player.playerKey) || new Map();
+          }
+        });
       }
     }
+
+    const scheduleStart = todayDateString();
+    const scheduleEnd = addDaysLocalDateString(scheduleStart, 1);
+    startContext = await fetchMlbScheduleContext({
+      startDate: scheduleStart,
+      endDate: scheduleEnd,
+    });
+    mappedPlayers.forEach((player) => {
+      const startModel = buildStartScore({
+        player,
+        focusKeys,
+        statIdByKey,
+        scheduleContext: startContext,
+      });
+      player.startScore = startModel.score;
+      player.startReasons = startModel.reasons;
+      player.startSchedule = startModel.schedule;
+    });
+    benchPlayers = benchPlayers.map((player) => {
+      const mapped = mappedPlayers.find((p) => p.playerKey === player.playerKey);
+      return mapped || player;
+    });
+    allBenchPlayers.forEach((player, index) => {
+      const mapped = mappedPlayers.find((p) => p.playerKey === player.playerKey);
+      if (mapped) allBenchPlayers[index] = mapped;
+    });
 
     if (benchPlayers.length > 0) {
       const dropRankFloorPrimary = savesEmergency ? 60 : DROP_RANK_FLOOR;
@@ -4611,19 +4965,52 @@ async function recommend({ snapshotOnly = false } = {}) {
               ? player.isPitcher
               : false
       );
-      startCandidates = applyStalePenalty(startCandidates, staleRecommendationNames);
+      startCandidates = rankStartCandidates({
+        candidates: applyStalePenalty(startCandidates, staleRecommendationNames),
+        focusKeys,
+        statIdByKey,
+        scheduleContext: startContext,
+      });
+      startDiagnostics = {
+        scheduleAvailable: !!startContext.scheduleAvailable,
+        dateRange: startContext.dateRange || null,
+        candidates: startCandidates.slice(0, 10).map((player) => ({
+          playerKey: player.playerKey || null,
+          name: player.name,
+          selectedPrimary: player.selectedPrimary || null,
+          positions: player.positions || [],
+          teamAbbr: player.teamAbbr || null,
+          score: toNumber(player.startScore),
+          schedule: player.startSchedule || null,
+          reasons: player.startReasons || [],
+        })),
+      };
       if (startCandidates.length === 0 && benchPlayers.length > 0) {
-        startCandidates = applyStalePenalty(
-          benchPlayers
+        startCandidates = rankStartCandidates({
+          candidates: applyStalePenalty(
+            benchPlayers
             .filter((player) => !player.isIL)
             .filter((player) => !isUnavailableStatus(player.status)),
-          staleRecommendationNames
-        ).sort((a, b) => {
-          if (a.rank === null && b.rank === null) return 0;
-          if (a.rank === null) return 1;
-          if (b.rank === null) return -1;
-          return a.rank - b.rank;
+            staleRecommendationNames
+          ),
+          focusKeys,
+          statIdByKey,
+          scheduleContext: startContext,
         });
+        startDiagnostics = {
+          scheduleAvailable: !!startContext.scheduleAvailable,
+          dateRange: startContext.dateRange || null,
+          candidates: startCandidates.slice(0, 10).map((player) => ({
+            playerKey: player.playerKey || null,
+            name: player.name,
+            selectedPrimary: player.selectedPrimary || null,
+            positions: player.positions || [],
+            teamAbbr: player.teamAbbr || null,
+            score: toNumber(player.startScore),
+            schedule: player.startSchedule || null,
+            reasons: player.startReasons || [],
+          })),
+        };
       }
       startSelections = startCandidates.slice(0, topLimit);
       if (startSelections.length > 0) {
@@ -4640,6 +5027,15 @@ async function recommend({ snapshotOnly = false } = {}) {
           focusKeys,
           statIdByKey,
         });
+        const planByKey = new Map(startPlans.map((plan) => [plan.playerKey, plan]));
+        startSelections = startSelections.filter((player) => {
+          const plan = planByKey.get(player.playerKey);
+          return !!plan?.startSlot;
+        });
+        startPlans = startPlans.filter((plan) => !!plan.startSlot);
+        if (startSelections.length === 0) {
+          startMessage = "START: none (no bench player clears schedule/risk upgrade threshold).";
+        }
       } else {
         startMessage = "START: none (bench does not fit needs).";
       }
@@ -5355,7 +5751,9 @@ async function recommend({ snapshotOnly = false } = {}) {
               : "";
       console.log(
         fmtBullet(
-          `Start ${plan.name}${slotText} ${position ? `(${position})` : ""}${benchText}`.trim()
+          `Start ${plan.name}${slotText} ${position ? `(${position})` : ""}${benchText}${
+            base?.startScore !== undefined ? ` [score ${formatStartScore(base.startScore)}]` : ""
+          }`.trim()
         )
       );
       actionSuggestions.start.push(plan.name);
@@ -5367,10 +5765,13 @@ async function recommend({ snapshotOnly = false } = {}) {
         startSlot: plan.startSlot || null,
         benchName: plan.benchName || null,
         benchSlot: plan.benchSlot || null,
+        score: toNumber(base?.startScore),
+        schedule: base?.startSchedule || null,
+        reasons: base?.startReasons || [],
         targetCategories: base?.isPitcher ? pitchingStatKeys : battingStatKeys,
         why: plan.note
           ? `Fits ${base?.isPitcher ? "pitching" : "batting"} targets but ${plan.note}.`
-          : `Fits ${base?.isPitcher ? "pitching" : "batting"} targets (${(base?.isPitcher ? pitchingStatKeys : battingStatKeys).join(", ")}); start at ${plan.startSlot || "eligible slot"}${plan.benchName ? ` over ${plan.benchName}` : ""}.`,
+          : `Score ${formatStartScore(base?.startScore) || "n/a"}; ${(base?.startReasons || []).slice(0, 3).join("; ") || `fits ${base?.isPitcher ? "pitching" : "batting"} targets`}; start at ${plan.startSlot || "eligible slot"}${plan.benchName ? ` over ${plan.benchName}` : ""}.`,
       });
     });
     console.log(
@@ -5443,6 +5844,8 @@ async function recommend({ snapshotOnly = false } = {}) {
     resolvedCategories,
     focusKeys,
     targetModel,
+    startContext,
+    startDiagnostics,
     pointInfoByKey,
     categoryNextGaps,
     rosterMappedPlayers,

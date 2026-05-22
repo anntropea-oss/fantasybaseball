@@ -112,7 +112,17 @@ qualifies, `recommend` uses that method for target selection and stores the
 active method in each snapshot's `featureInputs.recommendationContext`.
 Benchmark summaries are stored in `logs/model-benchmark-history.jsonl`.
 
-10. Backfill historical player/team data for model training.
+10. Start/bench recommendations use schedule-aware scoring.
+
+`recommend` ranks bench starts before printing lineup swaps. The start score
+uses the public MLB Stats API schedule/probable-pitcher feed when available,
+Yahoo roster team abbreviations, projected IP/K from available player stats, a
+simple win-probability proxy, opponent record, ERA/WHIP risk, and a minimum
+upgrade threshold over the active player who would be benched. If schedule data
+is unavailable, the command falls back to local roster/stat scoring instead of
+failing.
+
+11. Backfill historical player/team data for model training.
 
 ```bash
 node cli.js history-backfill
