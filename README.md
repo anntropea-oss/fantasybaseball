@@ -107,7 +107,10 @@ node cli.js benchmark
 ```
 
 This keeps the current heuristic as the production champion unless a challenger
-beats it across daily and all-runs walk-forward checks. When a challenger
+beats it across daily and all-runs walk-forward checks on the rank-aware
+objective. The rank-aware score weights category gains by weak categories,
+immediate category gaps, and whether the gain pressures the team directly above
+us, while still tracking raw roto-point gain as a safety check. When a challenger
 qualifies, `recommend` uses that method for target selection and stores the
 active method in each snapshot's `featureInputs.recommendationContext`.
 Benchmark summaries are stored in `logs/model-benchmark-history.jsonl`.

@@ -170,16 +170,20 @@ function benchmarkMethodRows(report) {
     .map(([method, metrics]) => ({
       method,
       meanGain: toNumber(metrics.meanGain) ?? 0,
+      meanRankAwareGain: toNumber(metrics.meanRankAwareGain) ?? 0,
       meanRegret: toNumber(metrics.meanRegret) ?? 0,
+      meanRankAwareRegret: toNumber(metrics.meanRankAwareRegret) ?? 0,
       deltaMeanGainVsBaseline: toNumber(metrics.deltaMeanGainVsBaseline) ?? 0,
+      deltaRankAwareGainVsBaseline: toNumber(metrics.deltaRankAwareGainVsBaseline) ?? 0,
       deltaRegretVsBaseline: toNumber(metrics.deltaRegretVsBaseline) ?? 0,
+      deltaRankAwareRegretVsBaseline: toNumber(metrics.deltaRankAwareRegretVsBaseline) ?? 0,
       n: toNumber(metrics.n) ?? 0,
     }));
 }
 
 function benchmarkBestChallenger(report) {
   const rows = benchmarkMethodRows(report).sort(
-    (a, b) => b.deltaMeanGainVsBaseline - a.deltaMeanGainVsBaseline
+    (a, b) => b.deltaRankAwareGainVsBaseline - a.deltaRankAwareGainVsBaseline
   );
   return rows[0] || null;
 }
@@ -191,12 +195,24 @@ function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
   if (!daily || !allRuns) return false;
   const dailyDelta = toNumber(daily.deltaMeanGainVsBaseline) ?? -Infinity;
   const allDelta = toNumber(allRuns.deltaMeanGainVsBaseline) ?? -Infinity;
+  const dailyRankAwareDelta =
+    toNumber(daily.deltaRankAwareGainVsBaseline) ?? -Infinity;
+  const allRankAwareDelta =
+    toNumber(allRuns.deltaRankAwareGainVsBaseline) ?? -Infinity;
   const dailyN = toNumber(daily.n) ?? 0;
-  const dailyRegretDelta = toNumber(daily.deltaRegretVsBaseline) ?? -Infinity;
-  const allRegretDelta = toNumber(allRuns.deltaRegretVsBaseline) ?? -Infinity;
+  const dailyRegretDelta =
+    toNumber(daily.deltaRankAwareRegretVsBaseline) ??
+    toNumber(daily.deltaRegretVsBaseline) ??
+    -Infinity;
+  const allRegretDelta =
+    toNumber(allRuns.deltaRankAwareRegretVsBaseline) ??
+    toNumber(allRuns.deltaRegretVsBaseline) ??
+    -Infinity;
   return (
-    dailyDelta > 0.15 &&
-    allDelta > 0.05 &&
+    dailyRankAwareDelta > 0.15 &&
+    allRankAwareDelta > 0.05 &&
+    dailyDelta >= -0.05 &&
+    allDelta >= -0.05 &&
     dailyN >= 20 &&
     dailyRegretDelta >= 0 &&
     allRegretDelta >= 0
@@ -276,27 +292,42 @@ function benchmarkModelStatusLines() {
   );
   if (dailyBaseline) {
     lines.push(
-      `Daily top-3 baseline mean gain ${formatSigned(dailyBaseline.meanGain)}; regret ${
-        (toNumber(dailyBaseline.meanRegret) ?? 0).toFixed(3)
+      `Daily top-3 baseline rank-aware gain ${formatSigned(
+        dailyBaseline.meanRankAwareGain ?? dailyBaseline.meanGain
+      )}; raw ${formatSigned(dailyBaseline.meanGain)}; regret ${
+        (
+          toNumber(dailyBaseline.meanRankAwareRegret) ??
+          toNumber(dailyBaseline.meanRegret) ??
+          0
+        ).toFixed(3)
       } vs oracle.`
     );
   }
   if (dailyOracle && dailyBaseline) {
-    const oracleGap =
+    const rankAwareOracleGap =
+      (toNumber(dailyOracle.meanRankAwareGain) ?? toNumber(dailyOracle.meanGain) ?? 0) -
+      (toNumber(dailyBaseline.meanRankAwareGain) ?? toNumber(dailyBaseline.meanGain) ?? 0);
+    const rawOracleGap =
       (toNumber(dailyOracle.meanGain) ?? 0) - (toNumber(dailyBaseline.meanGain) ?? 0);
-    lines.push(`Oracle gap: ${formatSigned(oracleGap)} category points per evaluated snapshot.`);
+    lines.push(
+      `Rank-aware oracle gap: ${formatSigned(rankAwareOracleGap)} weighted points per evaluated snapshot; raw gap ${formatSigned(rawOracleGap)}.`
+    );
   }
   if (best) {
-    const allDelta = allRuns?.methods?.[best.method]?.deltaMeanGainVsBaseline;
+    const allDelta = allRuns?.methods?.[best.method]?.deltaRankAwareGainVsBaseline;
     const allText = allDelta !== undefined ? `, all-runs ${formatSigned(allDelta)}` : "";
     lines.push(
-      `Closest challenger: ${best.method} daily ${formatSigned(
-        best.deltaMeanGainVsBaseline
+      `Closest challenger: ${best.method} rank-aware daily ${formatSigned(
+        best.deltaRankAwareGainVsBaseline
       )}${allText} vs baseline.`
     );
   }
   if (allBaseline) {
-    lines.push(`All-runs sensitivity baseline mean gain ${formatSigned(allBaseline.meanGain)}.`);
+    lines.push(
+      `All-runs sensitivity baseline rank-aware gain ${formatSigned(
+        allBaseline.meanRankAwareGain ?? allBaseline.meanGain
+      )}.`
+    );
   }
   return lines;
 }

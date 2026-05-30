@@ -540,6 +540,60 @@ function scoreTargets(snapshot, nextSnapshot, targets) {
   return targets.reduce((sum, key) => sum + categoryDelta(snapshot, nextSnapshot, key), 0);
 }
 
+function categoryRankAwareWeight(snapshot, key) {
+  const cat = categoryMap(snapshot).get(key) || {};
+  const points = toNumber(cat.points) ?? 0;
+  const gap = snapshot?.categoryNextGaps?.[key] || {};
+  const ptn = snapshot?.pointsToNextTeam || {};
+  let weight = 1;
+
+  // Weak categories are usually where marginal points matter most for climbing out of the cellar.
+  if (points <= 3) weight += 0.6;
+  else if (points <= 5) weight += 0.35;
+
+  // Immediate available roto points are more actionable than vague long-range category hope.
+  const pointsGainToNext = toNumber(gap.pointsGainToNext) ?? 0;
+  if (String(gap.status || "") === "chasing" && pointsGainToNext > 0) {
+    weight += Math.min(0.8, pointsGainToNext * 0.25);
+  }
+
+  // If the next category point is against the team directly above us, that is especially rank-relevant.
+  if (ptn.nextTeamKey && gap.nextTeamKey && ptn.nextTeamKey === gap.nextTeamKey) {
+    weight += 0.75;
+  }
+
+  return weight;
+}
+
+function scoreTargetsRankAware(snapshot, nextSnapshot, targets) {
+  return targets.reduce(
+    (sum, key) => sum + categoryDelta(snapshot, nextSnapshot, key) * categoryRankAwareWeight(snapshot, key),
+    0
+  );
+}
+
+function oracleTargetsRankAware(snapshot, nextSnapshot, categoryKeys, topN) {
+  return categoryKeys
+    .map((key) => [key, categoryDelta(snapshot, nextSnapshot, key) * categoryRankAwareWeight(snapshot, key)])
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([key]) => key);
+}
+
+function nextGapGain(snapshot, nextSnapshot) {
+  const before = toNumber(snapshot?.pointsToNextTeam?.delta);
+  const after = toNumber(nextSnapshot?.pointsToNextTeam?.delta);
+  if (before === null || after === null) return null;
+  return before - after;
+}
+
+function overallRankGain(snapshot, nextSnapshot) {
+  const before = toNumber(snapshot?.overallRank);
+  const after = toNumber(nextSnapshot?.overallRank);
+  if (before === null || after === null) return null;
+  return before - after;
+}
+
 function oracleTargets(snapshot, nextSnapshot, categoryKeys, topN) {
   return categoryKeys
     .map((key) => [key, categoryDelta(snapshot, nextSnapshot, key)])
@@ -564,7 +618,13 @@ function evaluate(rows) {
   const gains = rows.map((r) => r.gain);
   const oracleGains = rows.map((r) => r.oracleGain);
   const regrets = rows.map((r) => r.oracleGain - r.gain);
+  const rankAwareGains = rows.map((r) => r.rankAwareGain);
+  const rankAwareOracleGains = rows.map((r) => r.rankAwareOracleGain);
+  const rankAwareRegrets = rows.map((r) => r.rankAwareOracleGain - r.rankAwareGain);
+  const nextGapGains = rows.map((r) => r.nextGapGain).filter((v) => v !== null);
+  const rankGains = rows.map((r) => r.rankGain).filter((v) => v !== null);
   const positiveOracleRows = rows.filter((r) => r.oracleGain > 0);
+  const positiveRankAwareOracleRows = rows.filter((r) => r.rankAwareOracleGain > 0);
   const pickCount = rows.reduce((sum, r) => sum + r.targets.length, 0);
   const positivePicks = rows.reduce(
     (sum, r) => sum + r.targets.filter((key) => r.categoryDeltas[key] > 0).length,
@@ -576,11 +636,24 @@ function evaluate(rows) {
     medianGain: median(gains),
     meanOracleGain: mean(oracleGains),
     meanRegret: mean(regrets),
+    meanRankAwareGain: mean(rankAwareGains),
+    medianRankAwareGain: median(rankAwareGains),
+    meanRankAwareOracleGain: mean(rankAwareOracleGains),
+    meanRankAwareRegret: mean(rankAwareRegrets),
+    meanNextGapGain: mean(nextGapGains),
+    meanRankGain: mean(rankGains),
+    rankImproveRate:
+      rankGains.length > 0 ? rankGains.filter((value) => value > 0).length / rankGains.length : 0,
     captureRate:
       positiveOracleRows.length > 0
         ? mean(positiveOracleRows.map((r) => r.gain / r.oracleGain))
         : 0,
+    rankAwareCaptureRate:
+      positiveRankAwareOracleRows.length > 0
+        ? mean(positiveRankAwareOracleRows.map((r) => r.rankAwareGain / r.rankAwareOracleGain))
+        : 0,
     positiveDayRate: rows.filter((r) => r.gain > 0).length / rows.length,
+    positiveRankAwareDayRate: rows.filter((r) => r.rankAwareGain > 0).length / rows.length,
     nonNegativeDayRate: rows.filter((r) => r.gain >= 0).length / rows.length,
     pickHitRate: pickCount > 0 ? positivePicks / pickCount : 0,
   };
@@ -637,7 +710,9 @@ async function runBenchmark(snapshots, args) {
     const nextSnapshot = snapshots[t + 1];
     const deltas = Object.fromEntries(categoryKeys.map((key) => [key, categoryDelta(snapshot, nextSnapshot, key)]));
     const oracle = oracleTargets(snapshot, nextSnapshot, categoryKeys, args.topN);
+    const rankAwareOracle = oracleTargetsRankAware(snapshot, nextSnapshot, categoryKeys, args.topN);
     const oracleGain = scoreTargets(snapshot, nextSnapshot, oracle);
+    const rankAwareOracleGain = scoreTargetsRankAware(snapshot, nextSnapshot, rankAwareOracle);
     const baseline = (snapshot.focusTargets || snapshot.targets || []).slice(0, args.topN);
     const weakest = categoryKeys
       .map((key) => [key, categoryMap(snapshot).get(key)?.points ?? 0])
@@ -704,8 +779,13 @@ async function runBenchmark(snapshots, args) {
         nextDate: nextSnapshot.date,
         targets,
         gain: scoreTargets(snapshot, nextSnapshot, targets),
+        rankAwareGain: scoreTargetsRankAware(snapshot, nextSnapshot, targets),
         oracleTargets: oracle,
+        rankAwareOracleTargets: rankAwareOracle,
         oracleGain,
+        rankAwareOracleGain,
+        nextGapGain: nextGapGain(snapshot, nextSnapshot),
+        rankGain: overallRankGain(snapshot, nextSnapshot),
         categoryDeltas: deltas,
       });
     });
@@ -761,6 +841,10 @@ const summary = {
         ...metrics,
         deltaMeanGainVsBaseline: metrics.meanGain - baseline.meanGain,
         deltaRegretVsBaseline: baseline.meanRegret - metrics.meanRegret,
+        deltaRankAwareGainVsBaseline:
+          metrics.meanRankAwareGain - baseline.meanRankAwareGain,
+        deltaRankAwareRegretVsBaseline:
+          baseline.meanRankAwareRegret - metrics.meanRankAwareRegret,
       },
     ])
   ),
@@ -773,10 +857,10 @@ fs.writeFileSync(outJson, JSON.stringify(summary, null, 2));
 console.log("Deep model benchmark complete.");
 console.log(`Mode: ${summary.window.mode}, snapshots: ${summary.window.snapshots}, window: ${summary.window.from} -> ${summary.window.to}`);
 Object.entries(summary.methods)
-  .sort((a, b) => b[1].meanGain - a[1].meanGain)
+  .sort((a, b) => b[1].meanRankAwareGain - a[1].meanRankAwareGain)
   .forEach(([method, m]) => {
     console.log(
-      `${method}: meanGain=${m.meanGain.toFixed(3)} regret=${m.meanRegret.toFixed(3)} capture=${(m.captureRate * 100).toFixed(1)}% hit=${(m.pickHitRate * 100).toFixed(1)}% delta=${m.deltaMeanGainVsBaseline.toFixed(3)}`
+      `${method}: rankAware=${m.meanRankAwareGain.toFixed(3)} raw=${m.meanGain.toFixed(3)} regret=${m.meanRankAwareRegret.toFixed(3)} capture=${(m.rankAwareCaptureRate * 100).toFixed(1)}% hit=${(m.pickHitRate * 100).toFixed(1)}% delta=${m.deltaRankAwareGainVsBaseline.toFixed(3)}`
     );
   });
 console.log(`Report: ${outJson}`);

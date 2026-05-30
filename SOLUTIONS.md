@@ -81,7 +81,15 @@
 ## [2026-05-30 09:52] Benchmark Does Not Directly Optimize League Rank
 - Problem: The champion/challenger benchmark answers which target set gains the most category points, but the user goal is increasing league rank and closing the total-points gap to the next team.
 - Root Cause: `scripts/model-benchmark-deep.mjs` scores methods with `scoreTargets` category-point gain/regret and uses historical logged `focusTargets` as `baseline`; it does not directly score `overallRank`, `pointsToNextTeam.delta`, or an apples-to-apples recomputation of the current live heuristic.
-- Solution: No code fix applied yet; the audit identified the metric mismatch and the need for a rank-aware benchmark objective before future model promotions are treated as rank-optimized.
-- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
-- Status: Open
-- Verification: Reviewed `scripts/model-benchmark-deep.mjs`; refreshed May 30 benchmark shows `weakest` is still the closest challenger on mean category gain, but unsupervised rank prediction has `r2=0.000` because rank has stayed flat, so current evidence is insufficient to claim any challenger is best for rank improvement.
+- Solution: Resolved by the later rank-aware benchmark objective entry, which changed model evaluation and promotion to optimize weighted rank-aware gain before raw category-point gain.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`, `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`
+- Status: Resolved
+- Verification: Reviewed `scripts/model-benchmark-deep.mjs`; later verification confirmed benchmark reports now emit rank-aware gain/regret/capture metrics and `cli.js` promotion reads rank-aware deltas before activating a challenger.
+
+## [2026-05-30 10:02] Add Rank-Aware Benchmark Objective
+- Problem: Champion promotion was based on raw category-point gain, which did not directly align with increasing league rank or closing the next-team gap.
+- Root Cause: `scripts/model-benchmark-deep.mjs` only scored `scoreTargets` raw category deltas and CLI promotion sorted/qualified challengers by `deltaMeanGainVsBaseline`.
+- Solution: Added rank-aware target scoring that weights category gains by weak categories, immediate category gaps, and pressure on the team directly above us; emitted rank-aware gain/regret/capture metrics; changed CLI promotion/status to use rank-aware deltas with raw-gain safety checks.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` passed; `node --check scripts/model-benchmark-deep.mjs` passed; `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed 5/5; `caffeinate -dimsu node cli.js benchmark` promoted `weakest` with rank-aware daily +0.257 and all-runs +0.101 vs baseline while keeping raw gain positive.
