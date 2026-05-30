@@ -203,9 +203,41 @@ function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
   );
 }
 
+function benchmarkFreshness() {
+  const snapshots = readJsonl(SNAPSHOT_LOG);
+  if (snapshots.length === 0) {
+    return { fresh: true, snapshotCount: 0, latestDate: null };
+  }
+  const latest = snapshots
+    .slice()
+    .sort((a, b) => String(a.timestamp || a.id || a.date).localeCompare(String(b.timestamp || b.id || b.date)))
+    .at(-1);
+  const latestDate = latest?.date || null;
+  const snapshotCount = snapshots.length;
+  const reportFresh = (report) => {
+    if (!report) return false;
+    const reportRaw = toNumber(report.window?.rawSnapshots) ?? 0;
+    const reportTo = report.window?.to || null;
+    if (reportRaw < snapshotCount) return false;
+    if (latestDate && reportTo && String(reportTo) < String(latestDate)) return false;
+    if (latestDate && !reportTo) return false;
+    return true;
+  };
+  const daily = readJsonFileSafe(MODEL_BENCHMARK_DAILY_REPORT);
+  const allRuns = readJsonFileSafe(MODEL_BENCHMARK_ALL_REPORT);
+  return {
+    fresh: reportFresh(daily) && reportFresh(allRuns),
+    snapshotCount,
+    latestDate,
+    dailyRawSnapshots: toNumber(daily?.window?.rawSnapshots) ?? 0,
+    allRawSnapshots: toNumber(allRuns?.window?.rawSnapshots) ?? 0,
+  };
+}
+
 function benchmarkPromotionCandidate() {
   const daily = readJsonFileSafe(MODEL_BENCHMARK_DAILY_REPORT);
   const allRuns = readJsonFileSafe(MODEL_BENCHMARK_ALL_REPORT);
+  if (!benchmarkFreshness().fresh) return null;
   const best = benchmarkBestChallenger(daily);
   if (!best || !benchmarkQualifiesAsChampion(daily, allRuns, best.method)) {
     return null;
@@ -229,15 +261,18 @@ function benchmarkModelStatusLines() {
   const dailyOracle = daily?.methods?.oracle || null;
   const allBaseline = allRuns?.methods?.baseline || null;
   const best = benchmarkBestChallenger(daily);
+  const freshness = benchmarkFreshness();
   const promoted = best
-    ? benchmarkQualifiesAsChampion(daily, allRuns, best.method)
+    ? freshness.fresh && benchmarkQualifiesAsChampion(daily, allRuns, best.method)
     : false;
   const lines = [];
 
   lines.push(
     promoted
       ? `Champion: ${best.method} is active for target selection.`
-      : "Champion: current heuristic remains production default."
+      : freshness.fresh
+        ? "Champion: current heuristic remains production default."
+        : `Champion: current heuristic remains production default (benchmark stale vs ${freshness.snapshotCount} snapshots; run \`node cli.js benchmark\`).`
   );
   if (dailyBaseline) {
     lines.push(

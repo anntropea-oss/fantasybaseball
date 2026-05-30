@@ -69,3 +69,19 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` passed; `node --test tests/e2e/run-e2e.mjs` passed 5/5; `node cli.js recommend --no-dashboard` now writes `featureInputs.recommendationContext.startDiagnostics` with MLB schedule scores and recommends schedule-aware starts led by Michael Soroka instead of taking the first three bench pitchers from roster order; projected K is populated from IP/K stat-id fallbacks.
+
+## [2026-05-30 09:52] Guard Against Stale Champion Benchmarks
+- Problem: `recommend` could continue using a challenger model from stale benchmark reports even after newer snapshots changed the benchmark result. On May 30, refreshed benchmarks no longer promoted `weakest`, but prior daily recommendations had still reported `weakest` as active from May 16 benchmark files.
+- Root Cause: `benchmarkPromotionCandidate` and model status output trusted the saved benchmark JSON files without checking whether their window covered the current snapshot log.
+- Solution: Added benchmark freshness checks against `logs/snapshots.jsonl` snapshot count and latest snapshot date; stale reports can no longer promote a challenger and the status line now tells the user to rerun `node cli.js benchmark`.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` passed; `node cli.js benchmark` refreshed reports through `2026-05-30` and showed no promotion candidate, so target selection will fall back to the current production default unless a fresh benchmark qualifies a challenger.
+
+## [2026-05-30 09:52] Benchmark Does Not Directly Optimize League Rank
+- Problem: The champion/challenger benchmark answers which target set gains the most category points, but the user goal is increasing league rank and closing the total-points gap to the next team.
+- Root Cause: `scripts/model-benchmark-deep.mjs` scores methods with `scoreTargets` category-point gain/regret and uses historical logged `focusTargets` as `baseline`; it does not directly score `overallRank`, `pointsToNextTeam.delta`, or an apples-to-apples recomputation of the current live heuristic.
+- Solution: No code fix applied yet; the audit identified the metric mismatch and the need for a rank-aware benchmark objective before future model promotions are treated as rank-optimized.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Reviewed `scripts/model-benchmark-deep.mjs`; refreshed May 30 benchmark shows `weakest` is still the closest challenger on mean category gain, but unsupervised rank prediction has `r2=0.000` because rank has stayed flat, so current evidence is insufficient to claim any challenger is best for rank improvement.
