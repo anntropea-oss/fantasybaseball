@@ -93,3 +93,19 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` passed; `node --check scripts/model-benchmark-deep.mjs` passed; `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed 5/5; `caffeinate -dimsu node cli.js benchmark` promoted `weakest` with rank-aware daily +0.257 and all-runs +0.101 vs baseline while keeping raw gain positive.
+
+## [2026-05-31 10:57] Model Review Shows Rank Outcome Attribution Gap
+- Problem: A review of the model critique and current logs shows the system can rank target categories and compare benchmark methods, but it still does not attribute why overall league rank remains stuck at 12 or separate category-target quality from execution, roster-move availability, and opponent movement.
+- Root Cause: Current benchmark outputs optimize rank-aware category gain from snapshot-to-next-snapshot category deltas, while rank movement is sparse and delayed; recommendation logs do not yet decompose the points-to-next-team gap into controllable team gains, opponent gains, missed lineup adherence, unavailable safe drops, and add/drop opportunity cost.
+- Solution: Resolved by the later rank attribution and opportunity challenger entry, which adds a `rank-review` command/API, multi-horizon outcomes, action-feasibility attribution, and a benchmarked `opportunity` challenger.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`, `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/tests/e2e/run-e2e.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`
+- Status: Resolved
+- Verification: `node cli.js rank-review --days 14` now decomposes the rank/gap outcome into roto-point movement, estimated next-team movement, adherence, add/drop safety blocks, multi-horizon outcomes, and opportunity categories.
+
+## [2026-05-31 11:08] Add Rank Attribution And Opportunity Challenger
+- Problem: The model could recommend target categories and benchmark category gains, but it did not explain why rank stayed flat, evaluate feasible-action blockers, compare outcomes across multiple time horizons, or test whether direct next-team gap targeting should beat the current champion.
+- Root Cause: Rank review logic was limited to prior-day effectiveness lines, and benchmark challengers did not include a direct-gap opportunity method. The local app API also lacked a rank-attribution endpoint.
+- Solution: Added a shared rank attribution engine, `node cli.js rank-review`, `logs/rank-review.json`, `/api/rank-review`, dashboard trend cards, e2e coverage, multi-horizon gap/rank/target metrics, add/drop safety and adherence attribution, an opportunity matrix, and an `opportunity` benchmark challenger that can only become champion if it clears the same promotion gates.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/tests/e2e/run-e2e.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js`, `node --check scripts/model-benchmark-deep.mjs`, and `node --check tests/e2e/run-e2e.mjs` passed; `node cli.js rank-review --days 14` generated attribution output and `logs/rank-review.json`; `caffeinate -dimsu node cli.js benchmark` kept `weakest` champion while showing `opportunity` underperformed baseline; `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed 6/6.

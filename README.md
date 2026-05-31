@@ -113,9 +113,23 @@ immediate category gaps, and whether the gain pressures the team directly above
 us, while still tracking raw roto-point gain as a safety check. When a challenger
 qualifies, `recommend` uses that method for target selection and stores the
 active method in each snapshot's `featureInputs.recommendationContext`.
+The benchmark also tests a direct-gap `opportunity` challenger, but it is only
+promoted if it beats baseline across the same daily and all-runs checks.
 Benchmark summaries are stored in `logs/model-benchmark-history.jsonl`.
 
-10. Start/bench recommendations use schedule-aware scoring.
+10. Review why rank is or is not improving.
+
+```bash
+node cli.js rank-review --days 14
+```
+
+This writes `logs/rank-review.json` and prints a rank attribution report. The
+report decomposes gap movement to the next team into our roto-point movement,
+estimated next-team movement, target-category point movement, lineup adherence,
+add/drop feasibility blocks, multi-horizon outcomes, and the latest category
+opportunity matrix.
+
+11. Start/bench recommendations use schedule-aware scoring.
 
 `recommend` ranks bench starts before printing lineup swaps. The start score
 uses the public MLB Stats API schedule/probable-pitcher feed when available,
@@ -125,7 +139,7 @@ upgrade threshold over the active player who would be benched. If schedule data
 is unavailable, the command falls back to local roster/stat scoring instead of
 failing.
 
-11. Backfill historical player/team data for model training.
+12. Backfill historical player/team data for model training.
 
 ```bash
 node cli.js history-backfill

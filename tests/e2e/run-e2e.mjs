@@ -158,6 +158,25 @@ test("review command renders decision review HTML", async () => {
   assert.match(html, /Apply Yahoo Start Active Players first/);
 });
 
+test("rank-review command explains rank attribution", async () => {
+  const cwd = await makeSandbox();
+  const result = await runNode({ cwd, args: ["cli.js", "rank-review", "--days", "7"] });
+
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /Rank Attribution Review/);
+  assert.match(result.stdout, /Multi-horizon outcomes/);
+  assert.match(result.stdout, /Opportunity matrix/);
+
+  const outPath = path.join(cwd, "logs", "rank-review.json");
+  assert.equal(fs.existsSync(outPath), true);
+  const report = JSON.parse(await fsp.readFile(outPath, "utf8"));
+  assert.equal(report.latest.date, "2026-05-02");
+  assert.ok(Array.isArray(report.transitions));
+  assert.ok(Array.isArray(report.horizons));
+  assert.ok(Array.isArray(report.opportunityMatrix));
+  assert.ok(Array.isArray(report.recommendations));
+});
+
 test("dashboard publish writes docs/index.html", async () => {
   const cwd = await makeSandbox();
   const result = await runNode({
@@ -236,6 +255,14 @@ test("local app exposes stable JSON API contracts", async () => {
     const effectivenessJson = await effectiveness.json();
     assert.ok(Array.isArray(effectivenessJson.latestSummary));
     assert.ok(Array.isArray(effectivenessJson.rows));
+
+    const rankReview = await fetch(`${server.baseUrl}/api/rank-review?days=7`);
+    assert.equal(rankReview.status, 200);
+    const rankReviewJson = await rankReview.json();
+    assert.equal(rankReviewJson.latest.date, "2026-05-02");
+    assert.ok(Array.isArray(rankReviewJson.transitions));
+    assert.ok(Array.isArray(rankReviewJson.opportunityMatrix));
+    assert.ok(Array.isArray(rankReviewJson.recommendations));
   } finally {
     await stopProcess(server.child);
   }

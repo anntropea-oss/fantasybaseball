@@ -580,6 +580,15 @@ function oracleTargetsRankAware(snapshot, nextSnapshot, categoryKeys, topN) {
     .map(([key]) => key);
 }
 
+function opportunityTargets(snapshot, categoryKeys, topN) {
+  const cats = categoryMap(snapshot);
+  return categoryKeys
+    .map((key) => [key, categoryRankAwareWeight(snapshot, key), cats.get(key)?.points ?? 0])
+    .sort((a, b) => b[1] - a[1] || a[2] - b[2])
+    .slice(0, topN)
+    .map(([key]) => key);
+}
+
 function nextGapGain(snapshot, nextSnapshot) {
   const before = toNumber(snapshot?.pointsToNextTeam?.delta);
   const after = toNumber(nextSnapshot?.pointsToNextTeam?.delta);
@@ -697,6 +706,7 @@ async function runBenchmark(snapshots, args) {
     ["baseline", []],
     ["oracle", []],
     ["weakest", []],
+    ["opportunity", []],
     ["momentum", []],
     ["knn", []],
     ["ridge", []],
@@ -719,6 +729,7 @@ async function runBenchmark(snapshots, args) {
       .sort((a, b) => a[1] - b[1])
       .slice(0, args.topN)
       .map(([key]) => key);
+    const opportunity = opportunityTargets(snapshot, categoryKeys, args.topN);
     const momentumScores = new Map(
       categoryKeys.map((key) => [key, trailingMeanDelta(snapshots, t, key, Math.min(7, t))])
     );
@@ -764,6 +775,7 @@ async function runBenchmark(snapshots, args) {
       baseline,
       oracle,
       weakest,
+      opportunity,
       momentum: topTargets(momentumScores, args.topN),
       knn: topTargets(knnScores, args.topN),
       ridge: topTargets(ridgeScores, args.topN),

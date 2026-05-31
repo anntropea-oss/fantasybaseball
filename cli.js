@@ -2896,6 +2896,443 @@ function computeStartAdherence(baseSnapshot, currentSnapshot) {
   };
 }
 
+function latestSnapshotsByDate(snapshots) {
+  const byDate = new Map();
+  (snapshots || [])
+    .slice()
+    .sort((a, b) => String(a.timestamp || a.id || a.date).localeCompare(String(b.timestamp || b.id || b.date)))
+    .forEach((snapshot) => {
+      if (!snapshot?.date) return;
+      byDate.set(snapshot.date, snapshot);
+    });
+  return [...byDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
+function snapshotCategoryMap(snapshot) {
+  const out = new Map();
+  (snapshot?.categories || []).forEach((cat) => {
+    if (!cat?.key) return;
+    out.set(cat.key, cat);
+  });
+  return out;
+}
+
+function categoryPointDelta(fromSnapshot, toSnapshot, key) {
+  const fromCat = snapshotCategoryMap(fromSnapshot).get(key);
+  const toCat = snapshotCategoryMap(toSnapshot).get(key);
+  if (!fromCat || !toCat) return null;
+  const before = toNumber(fromCat.points);
+  const after = toNumber(toCat.points);
+  if (before === null || after === null) return null;
+  return after - before;
+}
+
+function categoryValueDelta(fromSnapshot, toSnapshot, key) {
+  const fromCat = snapshotCategoryMap(fromSnapshot).get(key);
+  const toCat = snapshotCategoryMap(toSnapshot).get(key);
+  if (!fromCat || !toCat) return null;
+  const before = toNumber(fromCat.value);
+  const after = toNumber(toCat.value);
+  if (before === null || after === null) return null;
+  return after - before;
+}
+
+function signedText(value, digits = 1) {
+  const n = toNumber(value);
+  if (n === null) return "n/a";
+  const text = Number.isInteger(n) ? `${n}` : n.toFixed(digits);
+  return n > 0 ? `+${text}` : text;
+}
+
+function rankDelta(fromSnapshot, toSnapshot) {
+  const before = toNumber(fromSnapshot?.overallRank);
+  const after = toNumber(toSnapshot?.overallRank);
+  if (before === null || after === null) return null;
+  return before - after;
+}
+
+function gapToNext(snapshot) {
+  return toNumber(snapshot?.pointsToNextTeam?.delta);
+}
+
+function gapClosed(fromSnapshot, toSnapshot) {
+  const before = gapToNext(fromSnapshot);
+  const after = gapToNext(toSnapshot);
+  if (before === null || after === null) return null;
+  return before - after;
+}
+
+function approximateNextTeamPointDelta(fromSnapshot, toSnapshot) {
+  const beforeGap = gapToNext(fromSnapshot);
+  const afterGap = gapToNext(toSnapshot);
+  if (beforeGap === null || afterGap === null) return null;
+  const myDelta = appTotalPoints(toSnapshot) - appTotalPoints(fromSnapshot);
+  return afterGap - beforeGap + myDelta;
+}
+
+function recommendationConstraints(snapshot) {
+  const rec = snapshot?.featureInputs?.recommendationContext || {};
+  const diagnostics = rec.dropDiagnostics || {};
+  const counts = rec.counts || {};
+  const candidatePool = rec.candidatePool || {};
+  const addCandidateCount =
+    toNumber(diagnostics.addCandidateCount) ??
+    toNumber(candidatePool.adds) ??
+    ((snapshot?.actions?.add || []).length +
+      (snapshot?.actions?.addBatting || []).length +
+      (snapshot?.actions?.addPitching || []).length);
+  const safeDropCandidates =
+    toNumber(diagnostics.safeDropCandidates) ??
+    toNumber(candidatePool.drops) ??
+    (snapshot?.actions?.drop || []).length;
+  const blockedProtectedDrops = Array.isArray(diagnostics.blockedProtectedDrops)
+    ? diagnostics.blockedProtectedDrops.length
+    : 0;
+  const staleProtectedInjuryReviews = Array.isArray(diagnostics.staleProtectedInjuryReviews)
+    ? diagnostics.staleProtectedInjuryReviews.length
+    : 0;
+  const addBlockedByDrops = addCandidateCount > 0 && safeDropCandidates === 0;
+  return {
+    targetModel: rec.targetModel || "baseline",
+    recommendedAdds:
+      (counts.add || 0) + (counts.addBatting || 0) + (counts.addPitching || 0),
+    recommendedStarts: counts.start || (snapshot?.actions?.start || []).length,
+    recommendedDrops: counts.drop || (snapshot?.actions?.drop || []).length,
+    addCandidateCount,
+    safeDropCandidates,
+    blockedProtectedDrops,
+    staleProtectedInjuryReviews,
+    addBlockedByDrops,
+  };
+}
+
+function transitionAttribution(fromSnapshot, toSnapshot) {
+  const targets = fromSnapshot?.focusTargets || fromSnapshot?.targets || [];
+  const pointDeltas = targets
+    .map((key) => categoryPointDelta(fromSnapshot, toSnapshot, key))
+    .filter((value) => value !== null);
+  const targetPointDelta = pointDeltas.reduce((sum, value) => sum + value, 0);
+  const targetDetails = targets.map((key) => ({
+    key,
+    pointDelta: categoryPointDelta(fromSnapshot, toSnapshot, key),
+    valueDelta: categoryValueDelta(fromSnapshot, toSnapshot, key),
+  }));
+  const adherence = computeStartAdherence(fromSnapshot, toSnapshot);
+  const constraints = recommendationConstraints(fromSnapshot);
+  const myPointDelta = appTotalPoints(toSnapshot) - appTotalPoints(fromSnapshot);
+  const nextTeamPointDelta = approximateNextTeamPointDelta(fromSnapshot, toSnapshot);
+  const gapDelta = gapClosed(fromSnapshot, toSnapshot);
+  const drivers = [];
+
+  if (constraints.addBlockedByDrops) {
+    drivers.push(`${constraints.addCandidateCount} add candidates but 0 safe drops`);
+  }
+  if (constraints.blockedProtectedDrops > 0) {
+    drivers.push(`${constraints.blockedProtectedDrops} protected drop blocks`);
+  }
+  if (gapDelta !== null && myPointDelta !== null && nextTeamPointDelta !== null) {
+    if (gapDelta < 0 && nextTeamPointDelta > myPointDelta) {
+      drivers.push(`next team gained about ${signedText(nextTeamPointDelta - myPointDelta)} more points than us`);
+    } else if (gapDelta > 0) {
+      drivers.push(`closed gap by ${signedText(gapDelta)}`);
+    }
+  }
+  return {
+    fromDate: fromSnapshot?.date || null,
+    toDate: toSnapshot?.date || null,
+    fromSnapshotId: fromSnapshot?.id || null,
+    toSnapshotId: toSnapshot?.id || null,
+    rankBefore: fromSnapshot?.overallRank ?? null,
+    rankAfter: toSnapshot?.overallRank ?? null,
+    rankDelta: rankDelta(fromSnapshot, toSnapshot),
+    gapBefore: gapToNext(fromSnapshot),
+    gapAfter: gapToNext(toSnapshot),
+    gapClosed: gapDelta,
+    myPointDelta,
+    nextTeamPointDelta,
+    targetModel: constraints.targetModel,
+    targets,
+    targetPointDelta,
+    targetDetails,
+    adherence,
+    constraints,
+    drivers,
+  };
+}
+
+function horizonOutcome(dailySnapshots, horizonDays) {
+  if (!Array.isArray(dailySnapshots) || dailySnapshots.length <= horizonDays) {
+    return null;
+  }
+  const rows = [];
+  for (let i = 0; i < dailySnapshots.length - horizonDays; i += 1) {
+    rows.push(transitionAttribution(dailySnapshots[i], dailySnapshots[i + horizonDays]));
+  }
+  const validGapRows = rows.filter((row) => row.gapClosed !== null);
+  const validRankRows = rows.filter((row) => row.rankDelta !== null);
+  const validTargetRows = rows.filter((row) => row.targetPointDelta !== null);
+  return {
+    days: horizonDays,
+    n: rows.length,
+    meanGapClosed: validGapRows.length
+      ? validGapRows.reduce((sum, row) => sum + row.gapClosed, 0) / validGapRows.length
+      : null,
+    meanRankDelta: validRankRows.length
+      ? validRankRows.reduce((sum, row) => sum + row.rankDelta, 0) / validRankRows.length
+      : null,
+    rankImproveRate: validRankRows.length
+      ? validRankRows.filter((row) => row.rankDelta > 0).length / validRankRows.length
+      : null,
+    meanTargetPointDelta: validTargetRows.length
+      ? validTargetRows.reduce((sum, row) => sum + row.targetPointDelta, 0) / validTargetRows.length
+      : null,
+  };
+}
+
+function latestOpportunityMatrix(snapshot, previousSnapshots = []) {
+  const latest = snapshot;
+  const previous = previousSnapshots[previousSnapshots.length - 1] || null;
+  const ptn = latest?.pointsToNextTeam || {};
+  const nextTeamKey = ptn.nextTeamKey || null;
+  return (latest?.categories || [])
+    .map((cat) => {
+      const gap = latest?.categoryNextGaps?.[cat.key] || {};
+      const points = toNumber(cat.points) ?? 0;
+      const pointsGainToNext = toNumber(gap.pointsGainToNext) ?? 0;
+      const deltaToNext = toNumber(gap.deltaToNext);
+      const recentPointDelta = previous ? categoryPointDelta(previous, latest, cat.key) : null;
+      let score = 0;
+      if (points <= 3) score += 4;
+      else if (points <= 5) score += 2;
+      if (String(gap.status || "") === "chasing" && pointsGainToNext > 0) score += Math.min(4, pointsGainToNext);
+      if (nextTeamKey && gap.nextTeamKey && nextTeamKey === gap.nextTeamKey) score += 3;
+      if (deltaToNext !== null) {
+        score += Math.max(0, 2 - Math.min(2, Math.abs(deltaToNext) / Math.max(1, statUnitScale(cat.key))));
+      }
+      if (recentPointDelta !== null && recentPointDelta < 0) score += 1;
+      return {
+        key: cat.key,
+        name: cat.name || cat.key,
+        points,
+        rank: toNumber(cat.rank),
+        value: toNumber(cat.value),
+        status: gap.status || null,
+        nextTeamName: gap.nextTeamName || null,
+        nextTeamKey: gap.nextTeamKey || null,
+        versusNextTeamAbove: !!(nextTeamKey && gap.nextTeamKey && nextTeamKey === gap.nextTeamKey),
+        deltaToNext,
+        pointsGainToNext,
+        recentPointDelta,
+        opportunityScore: score,
+      };
+    })
+    .sort((a, b) => b.opportunityScore - a.opportunityScore);
+}
+
+function buildRankReview(snapshots, { days = 14, horizons = [1, 3, 7] } = {}) {
+  const daily = latestSnapshotsByDate(snapshots);
+  const latest = daily[daily.length - 1] || null;
+  const window = daily.slice(Math.max(0, daily.length - Math.max(days + 1, 2)));
+  const transitions = [];
+  for (let i = 1; i < window.length; i += 1) {
+    transitions.push(transitionAttribution(window[i - 1], window[i]));
+  }
+  const allTransitions = [];
+  for (let i = 1; i < daily.length; i += 1) {
+    allTransitions.push(transitionAttribution(daily[i - 1], daily[i]));
+  }
+  const latestTransition = transitions[transitions.length - 1] || null;
+  const blockedDays = transitions.filter((row) => row.constraints.addBlockedByDrops).length;
+  const adherenceRows = transitions.filter((row) => row.adherence && row.adherence.recommendedCount > 0);
+  const adherenceRate = adherenceRows.length
+    ? adherenceRows.reduce((sum, row) => sum + row.adherence.adherence, 0) / adherenceRows.length
+    : null;
+  const totalGapClosed = transitions
+    .filter((row) => row.gapClosed !== null)
+    .reduce((sum, row) => sum + row.gapClosed, 0);
+  const totalMyPointDelta = transitions.reduce((sum, row) => sum + row.myPointDelta, 0);
+  const totalNextTeamPointDelta = transitions
+    .filter((row) => row.nextTeamPointDelta !== null)
+    .reduce((sum, row) => sum + row.nextTeamPointDelta, 0);
+  const latestIdx = daily.length - 1;
+  const opportunityMatrix = latest
+    ? latestOpportunityMatrix(latest, daily.slice(Math.max(0, latestIdx - 7), latestIdx))
+    : [];
+
+  return {
+    generatedAt: new Date().toISOString(),
+    window: {
+      days,
+      from: window[0]?.date || null,
+      to: latest?.date || null,
+      dailySnapshots: window.length,
+      totalDailySnapshots: daily.length,
+    },
+    latest: latest
+      ? {
+          date: latest.date,
+          snapshotId: latest.id || null,
+          rank: latest.overallRank ?? null,
+          totalPoints: appTotalPoints(latest),
+          pointsToNextTeam: latest.pointsToNextTeam || null,
+          targets: latest.focusTargets || latest.targets || [],
+          targetModel: latest.featureInputs?.recommendationContext?.targetModel || "baseline",
+        }
+      : null,
+    summary: {
+      rankChanged: transitions.some((row) => row.rankDelta && row.rankDelta !== 0),
+      totalGapClosed,
+      totalMyPointDelta,
+      totalNextTeamPointDelta,
+      adherenceRate,
+      blockedDays,
+      evaluatedDays: transitions.length,
+    },
+    latestTransition,
+    transitions,
+    horizons: horizons.map((horizon) => horizonOutcome(daily, horizon)).filter(Boolean),
+    opportunityMatrix,
+    recommendations: rankReviewRecommendations({
+      transitions,
+      latestTransition,
+      opportunityMatrix,
+      adherenceRate,
+      blockedDays,
+    }),
+    allTransitions,
+  };
+}
+
+function rankReviewRecommendations({ transitions, latestTransition, opportunityMatrix, adherenceRate, blockedDays }) {
+  const recs = [];
+  if (adherenceRate !== null && adherenceRate < 0.75) {
+    recs.push({
+      priority: "high",
+      title: "Fix lineup execution before changing models",
+      detail: `Average recommended-start adherence in the review window is ${(adherenceRate * 100).toFixed(0)}%. A model cannot improve standings if starts are not applied.`,
+    });
+  }
+  if (blockedDays > 0) {
+    recs.push({
+      priority: "high",
+      title: "Resolve safe-drop bottleneck",
+      detail: `${blockedDays} review-window days had add candidates but no safe drop candidates. That blocks roster-upgrade recommendations even when the model finds adds.`,
+    });
+  }
+  const directNext = opportunityMatrix.filter((row) => row.versusNextTeamAbove).slice(0, 3);
+  if (directNext.length > 0) {
+    recs.push({
+      priority: "medium",
+      title: "Prioritize categories that hit the team directly above us",
+      detail: `Best direct-gap categories: ${directNext.map((row) => row.key).join(", ")}.`,
+    });
+  }
+  const top = opportunityMatrix.slice(0, 3);
+  if (top.length > 0) {
+    recs.push({
+      priority: "medium",
+      title: "Use opportunity matrix as a tie-breaker",
+      detail: `Current top opportunity categories: ${top.map((row) => `${row.key} (${row.opportunityScore.toFixed(1)})`).join(", ")}.`,
+    });
+  }
+  if (latestTransition?.gapClosed !== null && latestTransition.gapClosed < 0) {
+    recs.push({
+      priority: "medium",
+      title: "Separate our gains from opponent movement",
+      detail: `Latest gap worsened by ${signedText(-latestTransition.gapClosed)} even though our own point movement was ${signedText(latestTransition.myPointDelta)}; compare this to estimated next-team movement ${signedText(latestTransition.nextTeamPointDelta)}.`,
+    });
+  }
+  if (transitions.length > 0 && recs.length === 0) {
+    recs.push({
+      priority: "low",
+      title: "Keep current champion but monitor multi-day outcomes",
+      detail: "No dominant execution or roster-constraint blocker appeared in the current review window.",
+    });
+  }
+  return recs;
+}
+
+function printRankReview(report) {
+  if (!report.latest) {
+    console.log("No snapshots found. Run recommend first.");
+    return;
+  }
+  console.log(cYellow("Rank Attribution Review"));
+  console.log(
+    `Window ${report.window.from || "n/a"} -> ${report.window.to || "n/a"} | Rank ${report.latest.rank ?? "n/a"} | Points to next ${
+      report.latest.pointsToNextTeam?.delta !== undefined ? `+${formatMaybeNumber(report.latest.pointsToNextTeam.delta, 1)}` : "n/a"
+    }`
+  );
+  console.log("");
+
+  console.log(cYellow("Why rank moved or stayed stuck:"));
+  console.log(fmtBullet(`Gap closed over window: ${signedText(report.summary.totalGapClosed, 1)} points`));
+  console.log(fmtBullet(`Our roto-point movement: ${signedText(report.summary.totalMyPointDelta, 1)}`));
+  console.log(fmtBullet(`Estimated next-team movement: ${signedText(report.summary.totalNextTeamPointDelta, 1)}`));
+  if (report.summary.adherenceRate !== null) {
+    console.log(fmtBullet(`Average start adherence: ${(report.summary.adherenceRate * 100).toFixed(0)}%`));
+  }
+  console.log(fmtBullet(`Days blocked by add/drop safety: ${report.summary.blockedDays}/${report.summary.evaluatedDays}`));
+  if (!report.summary.rankChanged) {
+    console.log(fmtBullet("Overall rank did not change in this review window."));
+  }
+  console.log("");
+
+  if (report.latestTransition) {
+    const row = report.latestTransition;
+    console.log(cYellow("Latest daily attribution:"));
+    console.log(fmtBullet(`${row.fromDate} -> ${row.toDate}: rank ${row.rankBefore} -> ${row.rankAfter}, gap closed ${signedText(row.gapClosed, 1)}`));
+    console.log(fmtBullet(`Targets ${row.targets.join(", ") || "none"} netted ${signedText(row.targetPointDelta, 1)} category points`));
+    if (row.adherence && row.adherence.recommendedCount > 0) {
+      console.log(fmtBullet(`Lineup adherence ${row.adherence.matched}/${row.adherence.recommendedCount}`));
+    }
+    if (row.drivers.length > 0) {
+      row.drivers.forEach((driver) => console.log(fmtBullet(driver)));
+    }
+    console.log("");
+  }
+
+  console.log(cYellow("Multi-horizon outcomes:"));
+  report.horizons.forEach((horizon) => {
+    console.log(
+      fmtBullet(
+        `${horizon.days}d: gap closed avg ${signedText(horizon.meanGapClosed, 2)}, rank gain avg ${signedText(horizon.meanRankDelta, 2)}, target pts avg ${signedText(horizon.meanTargetPointDelta, 2)}, rank improve rate ${
+          horizon.rankImproveRate === null ? "n/a" : `${(horizon.rankImproveRate * 100).toFixed(0)}%`
+        }`
+      )
+    );
+  });
+  console.log("");
+
+  console.log(cYellow("Opportunity matrix:"));
+  report.opportunityMatrix.slice(0, 8).forEach((row) => {
+    const direct = row.versusNextTeamAbove ? "direct next-team gap" : row.status || "no immediate gap";
+    console.log(
+      fmtBullet(
+        `${row.key}: score ${row.opportunityScore.toFixed(1)}, points ${formatMaybeNumber(row.points, 1)}, rank ${formatMaybeNumber(row.rank, 0)}, next gain ${formatMaybeNumber(row.pointsGainToNext, 1)} (${direct})`
+      )
+    );
+  });
+  console.log("");
+
+  console.log(cYellow("Recommended next actions:"));
+  report.recommendations.forEach((rec) => {
+    console.log(fmtBullet(`${rec.priority.toUpperCase()}: ${rec.title} - ${rec.detail}`));
+  });
+}
+
+async function rankReview() {
+  const days = Number(getArgValue("--days")) || 14;
+  const snapshots = readJsonl(SNAPSHOT_LOG);
+  const report = buildRankReview(snapshots, { days });
+  const outPath = path.join(LOG_DIR, "rank-review.json");
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
+  printRankReview(report);
+  console.log("");
+  console.log(`Rank review JSON: ${outPath}`);
+}
+
 function isMeaningfulUpgrade(addRank, dropRank) {
   if (addRank === null || addRank === undefined) return false;
   if (dropRank === null || dropRank === undefined) return false;
@@ -3916,6 +4353,40 @@ function applyLearningBoosts(rankedCategories, learning, efficiencyScores, point
     .sort((a, b) => b.priorityScore - a.priorityScore);
 }
 
+function opportunityScoreForCategory(cat, categoryNextGaps, pointsToNextTeam) {
+  const gap = categoryNextGaps?.[cat.key] || {};
+  const points = toNumber(cat.points) ?? 0;
+  const pointsGainToNext = toNumber(gap.pointsGainToNext) ?? 0;
+  const deltaToNext = toNumber(gap.deltaToNext);
+  let score = 0;
+  if (points <= 3) score += 4;
+  else if (points <= 5) score += 2;
+  if (String(gap.status || "") === "chasing" && pointsGainToNext > 0) {
+    score += Math.min(4, pointsGainToNext);
+  }
+  if (
+    pointsToNextTeam?.nextTeamKey &&
+    gap.nextTeamKey &&
+    pointsToNextTeam.nextTeamKey === gap.nextTeamKey
+  ) {
+    score += 3;
+  }
+  if (deltaToNext !== null) {
+    score += Math.max(0, 2 - Math.min(2, Math.abs(deltaToNext) / Math.max(1, statUnitScale(cat.key))));
+  }
+  return score;
+}
+
+function rankOpportunityCategories(resolvedCategories, categoryNextGaps, pointsToNextTeam) {
+  return (resolvedCategories || [])
+    .filter((cat) => cat.rank !== null && !Number.isNaN(cat.rank))
+    .map((cat) => ({
+      ...cat,
+      opportunityScore: opportunityScoreForCategory(cat, categoryNextGaps, pointsToNextTeam),
+    }))
+    .sort((a, b) => b.opportunityScore - a.opportunityScore || (a.points ?? 99) - (b.points ?? 99));
+}
+
 function extractTeamKey(teamNode) {
   const key =
     findFirstValueByKey(teamNode, "team_key") ??
@@ -4420,6 +4891,13 @@ async function recommend({ snapshotOnly = false } = {}) {
   console.log("");
   printModelStatus();
 
+  const opportunityCategories = rankOpportunityCategories(
+    resolvedCategories,
+    categoryNextGaps,
+    pointsToNextTeam
+  );
+  const opportunityCategoryKeys = opportunityCategories.slice(0, 3).map((cat) => cat.key);
+
   let pointGainTargets = [];
   let bestValueTargets = [];
   const pointInfoByKey = new Map();
@@ -4555,14 +5033,16 @@ async function recommend({ snapshotOnly = false } = {}) {
   }
 
   const primaryTargetKeys =
-    targetModel === "weakest"
+    targetModel === "opportunity"
+      ? opportunityCategoryKeys
+      : targetModel === "weakest"
       ? weakestCategoryKeys
       : pointGainTargets.length > 0
         ? pointGainTargets
         : worstCategoryKeys;
   targetKeys = [...primaryTargetKeys];
   const focusKeys =
-    targetModel === "weakest"
+    targetModel === "weakest" || targetModel === "opportunity"
       ? [...new Set(primaryTargetKeys)]
       : [...new Set([...primaryTargetKeys, ...bestValueTargets])];
   const needsSaves = focusKeys.includes("SV");
@@ -4574,7 +5054,9 @@ async function recommend({ snapshotOnly = false } = {}) {
   if (targetKeys.length > 0) {
     console.log(
       cYellow(
-        targetModel === "weakest"
+        targetModel === "opportunity"
+          ? "Targets (champion: rank opportunity categories):"
+          : targetModel === "weakest"
           ? "Targets (champion: weakest categories):"
           : pointGainTargets.length > 0
           ? "Targets (closest point gains):"
@@ -4594,7 +5076,12 @@ async function recommend({ snapshotOnly = false } = {}) {
         info && info.pointsGain !== null
           ? `, next ${info.directionText} (+${formatPoints(info.pointsGain)} pts)`
           : "";
-      console.log(fmtBullet(`${cat.key} ${rankLabel}, val ${cat.value}${infoText}`));
+      const opportunity = opportunityCategories.find((row) => row.key === key);
+      const opportunityText =
+        targetModel === "opportunity" && opportunity
+          ? `, opp ${opportunity.opportunityScore.toFixed(1)}`
+          : "";
+      console.log(fmtBullet(`${cat.key} ${rankLabel}, val ${cat.value}${infoText}${opportunityText}`));
     });
   } else {
     console.log(fmtLine("Could not infer category ranks from standings."));
@@ -6417,6 +6904,17 @@ async function appEffectivenessPayload() {
   };
 }
 
+async function appRankReviewPayload(url) {
+  const limit = parseAppLimit(url.searchParams.get("limit"), 120);
+  const days = parseAppLimit(url.searchParams.get("days"), 14);
+  const snapshots = await appSnapshots(limit);
+  const report = buildRankReview(snapshots, { days });
+  return {
+    ...report,
+    allTransitions: undefined,
+  };
+}
+
 function sendAppJson(res, payload, status = 200) {
   const body = JSON.stringify(payload, null, 2);
   res.writeHead(status, {
@@ -6600,10 +7098,22 @@ function appHtml() {
     }
     function renderTrends() {
       const rows = state.snapshots.snapshots || [];
+      const rank = state.rankReview || {};
+      const latest = rank.latestTransition || {};
+      const recItems = (rank.recommendations || []).map((rec) => "<li><strong>" + esc(String(rec.priority || "").toUpperCase()) + ":</strong> " + esc(rec.title || "") + "<div class='sub'>" + esc(rec.detail || "") + "</div></li>").join("") || "<li class='empty'>No rank attribution recommendations yet.</li>";
+      const oppItems = (rank.opportunityMatrix || []).slice(0, 5).map((row) => "<li><strong>" + esc(row.key) + "</strong> <span class='sub'>score " + esc(fmt(row.opportunityScore, 1)) + " · points " + esc(fmt(row.points, 1)) + " · next gain " + esc(fmt(row.pointsGainToNext, 1)) + (row.versusNextTeamAbove ? " · direct next-team gap" : "") + "</span></li>").join("") || "<li class='empty'>No opportunity matrix available.</li>";
       document.querySelector("#trends").innerHTML =
         "<article class='card half'><h2>Rank Trend</h2>" + drawChart(rows, "overallRank") + "</article>" +
         "<article class='card half'><h2>Points Trend</h2>" + drawChart(rows, "totalPoints") + "</article>" +
-        "<article class='card'><h2>Effectiveness</h2><ul>" + ((state.effectiveness.latestSummary || []).map((line) => "<li>" + esc(line.replace(/^- /, "")) + "</li>").join("") || "<li class='empty'>No prior daily comparison yet.</li>") + "</ul></article>";
+        "<article class='card half'><h2>Rank Attribution</h2><ul>" +
+          "<li>Gap closed over window: " + esc(fmt(rank.summary?.totalGapClosed, 1)) + "</li>" +
+          "<li>Our point movement: " + esc(fmt(rank.summary?.totalMyPointDelta, 1)) + "</li>" +
+          "<li>Latest target point delta: " + esc(fmt(latest.targetPointDelta, 1)) + "</li>" +
+          "<li>Blocked add/drop days: " + esc(rank.summary?.blockedDays ?? "n/a") + "</li>" +
+        "</ul></article>" +
+        "<article class='card half'><h2>Rank Recommendations</h2><ul>" + recItems + "</ul></article>" +
+        "<article class='card half'><h2>Opportunity Matrix</h2><ul>" + oppItems + "</ul></article>" +
+        "<article class='card half'><h2>Effectiveness</h2><ul>" + ((state.effectiveness.latestSummary || []).map((line) => "<li>" + esc(line.replace(/^- /, "")) + "</li>").join("") || "<li class='empty'>No prior daily comparison yet.</li>") + "</ul></article>";
     }
     function renderHistory() {
       const rows = (state.snapshots.snapshots || []).slice(-30).reverse();
@@ -6617,11 +7127,12 @@ function appHtml() {
       renderToday(); renderReview(); renderLineup(); renderTrends(); renderHistory();
     }
     async function loadAll() {
-      [state.latest, state.snapshots, state.lineup, state.effectiveness] = await Promise.all([
+      [state.latest, state.snapshots, state.lineup, state.effectiveness, state.rankReview] = await Promise.all([
         getJson("/api/latest"),
         getJson("/api/snapshots?limit=90&daily=1"),
         getJson("/api/lineup"),
         getJson("/api/effectiveness"),
+        getJson("/api/rank-review?days=14"),
       ]);
       renderAll();
     }
@@ -6676,6 +7187,10 @@ async function app() {
         sendAppJson(res, await appEffectivenessPayload());
         return;
       }
+      if (url.pathname === "/api/rank-review") {
+        sendAppJson(res, await appRankReviewPayload(url));
+        return;
+      }
       sendAppJson(res, { error: "Not found" }, 404);
     })().catch((error) => {
       sendAppJson(res, { error: error.message }, 500);
@@ -6685,7 +7200,7 @@ async function app() {
   server.listen(port, host, () => {
     const url = `http://${host}:${port}`;
     console.log(`Fantasy app: ${url}`);
-    console.log("API: /api/latest /api/snapshots /api/recommendations /api/lineup /api/effectiveness");
+    console.log("API: /api/latest /api/snapshots /api/recommendations /api/lineup /api/effectiveness /api/rank-review");
     if (shouldOpenDashboard()) openDashboardFile(url);
   });
 }
@@ -6804,6 +7319,8 @@ async function main() {
       await backfillDb();
     } else if (command === "review") {
       await review();
+    } else if (command === "rank-review") {
+      await rankReview();
     } else if (command === "recommend") {
       await recommend();
     } else if (command === "snapshot") {
@@ -6812,7 +7329,7 @@ async function main() {
       await lineup();
     } else {
       console.log(
-        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|benchmark|history-backfill|app|db-backfill|log|recommend|review|snapshot|lineup> [--top N] [--position C] [--port 8787] [--verbose]"
+        "Usage: node fantasy/cli.js <auth|check|cleanup|discover|dashboard|benchmark|history-backfill|app|db-backfill|log|recommend|review|rank-review|snapshot|lineup> [--top N] [--position C] [--port 8787] [--verbose]"
       );
     }
   } catch (error) {
