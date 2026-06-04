@@ -115,6 +115,9 @@ qualifies, `recommend` uses that method for target selection and stores the
 active method in each snapshot's `featureInputs.recommendationContext`.
 The benchmark also tests a direct-gap `opportunity` challenger, but it is only
 promoted if it beats baseline across the same daily and all-runs checks.
+`recommend` automatically refreshes missing or stale benchmark reports before
+choosing targets; set `FANTASY_AUTO_BENCHMARK=0` or pass
+`--no-benchmark-refresh` to skip that startup refresh.
 Benchmark summaries are stored in `logs/model-benchmark-history.jsonl`.
 
 10. Review why rank is or is not improving.
@@ -127,7 +130,9 @@ This writes `logs/rank-review.json` and prints a rank attribution report. The
 report decomposes gap movement to the next team into our roto-point movement,
 estimated next-team movement, target-category point movement, lineup adherence,
 add/drop feasibility blocks, multi-horizon outcomes, and the latest category
-opportunity matrix.
+opportunity matrix. It also separates start adherence from start outcome, showing
+target-point movement, non-target-point movement, and ratio-risk flags for the
+recommended starts.
 
 11. Start/bench recommendations use schedule-aware scoring.
 

@@ -175,6 +175,8 @@ test("rank-review command explains rank attribution", async () => {
   assert.ok(Array.isArray(report.horizons));
   assert.ok(Array.isArray(report.opportunityMatrix));
   assert.ok(Array.isArray(report.recommendations));
+  assert.ok(report.latestTransition.startOutcome);
+  assert.equal(report.latestTransition.startOutcome.targetPointDelta, 1.5);
 });
 
 test("dashboard publish writes docs/index.html", async () => {

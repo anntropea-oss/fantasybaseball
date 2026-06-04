@@ -475,6 +475,21 @@ async function benchmark() {
   console.log(`Benchmark history: ${MODEL_BENCHMARK_HISTORY_LOG}`);
 }
 
+async function refreshBenchmarkIfStaleForRecommend() {
+  if (process.env.FANTASY_AUTO_BENCHMARK === "0") return false;
+  if (process.argv.includes("--no-benchmark-refresh")) return false;
+  const freshness = benchmarkFreshness();
+  if (freshness.fresh) return false;
+  console.log(
+    cYellow(
+      `Benchmark stale or missing vs ${freshness.snapshotCount} snapshots; refreshing before recommend...`
+    )
+  );
+  await benchmark();
+  console.log("");
+  return true;
+}
+
 function ensureLogDir() {
   fs.mkdirSync(LOG_DIR, { recursive: true });
 }
@@ -2777,6 +2792,7 @@ function buildEffectivenessSummary(snapshots, currentSnapshot) {
   } else {
     adherence = computeStartAdherence(adherenceBaseSnapshot, currentSnapshot);
   }
+  const startOutcome = buildStartOutcomeAttribution(adherenceBaseSnapshot, currentSnapshot);
 
   const lines = [];
   if (adherence && adherence.recommendedCount > 0) {
@@ -2800,6 +2816,17 @@ function buildEffectivenessSummary(snapshots, currentSnapshot) {
         if (!prevSlot && !currSlot) return;
         lines.push(`- Adherence detail: ${name} ${prevSlot || "?"} -> ${currSlot || "?"}`);
       });
+    }
+    if (startOutcome) {
+      lines.push(
+        `- Start outcome: target points ${signedText(startOutcome.targetPointDelta, 1)}, non-target points ${signedText(startOutcome.nonTargetPointDelta, 1)}, gap closed ${signedText(startOutcome.gapClosed, 1)}`
+      );
+      startOutcome.starts
+        .filter((start) => start.riskFlags.length > 0)
+        .slice(0, 3)
+        .forEach((start) => {
+          lines.push(`- Start risk: ${start.playerName} (${start.riskFlags.join("; ")})`);
+        });
     }
   }
   const prevRank = toNumber(prevSnapshot.overallRank);
@@ -2893,6 +2920,89 @@ function computeStartAdherence(baseSnapshot, currentSnapshot) {
       inferredStarts: [...inferredStarts],
       activeNowMatches: recommended.filter((name) => activeNow.has(name)),
     },
+  };
+}
+
+function startRiskAssessment({ schedule, focusKeys = [] }) {
+  const focusSet = new Set(Array.isArray(focusKeys) ? focusKeys : []);
+  const era = toNumber(schedule?.era);
+  const whip = toNumber(schedule?.whip);
+  const projectedIp = toNumber(schedule?.projectedIp) ?? 0;
+  const flags = [];
+  let penalty = 0;
+
+  if (focusSet.has("ERA") && era !== null) {
+    if (era >= 5.5) {
+      flags.push(`high ERA risk ${era}`);
+      penalty += 12;
+    } else if (era >= 4.8) {
+      flags.push(`elevated ERA risk ${era}`);
+      penalty += 6;
+    }
+  }
+  if (focusSet.has("WHIP") && whip !== null) {
+    if (whip >= 1.35) {
+      flags.push(`high WHIP risk ${whip}`);
+      penalty += 12;
+    } else if (whip >= 1.25) {
+      flags.push(`elevated WHIP risk ${whip}`);
+      penalty += 5;
+    }
+  }
+  if ((focusSet.has("ERA") || focusSet.has("WHIP")) && projectedIp >= 5 && flags.length > 0) {
+    flags.push(`bulk innings exposure ${projectedIp}`);
+    penalty += 4;
+  }
+
+  return { flags, penalty };
+}
+
+function startDetailsForSnapshot(snapshot) {
+  const details = Array.isArray(snapshot?.actionDetails?.start)
+    ? snapshot.actionDetails.start
+    : [];
+  if (details.length > 0) return details;
+  return (snapshot?.actions?.start || []).map((name) => ({ playerName: name }));
+}
+
+function buildStartOutcomeAttribution(baseSnapshot, currentSnapshot) {
+  const details = startDetailsForSnapshot(baseSnapshot);
+  if (details.length === 0) return null;
+  const adherence = computeStartAdherence(baseSnapshot, currentSnapshot);
+  const targetKeys = baseSnapshot.focusTargets || baseSnapshot.targets || [];
+  const allKeys = (baseSnapshot.categories || []).map((cat) => cat.key);
+  const targetSet = new Set(targetKeys);
+  const targetPointDelta = targetKeys.reduce(
+    (sum, key) => sum + (categoryPointDelta(baseSnapshot, currentSnapshot, key) ?? 0),
+    0
+  );
+  const nonTargetPointDelta = allKeys
+    .filter((key) => !targetSet.has(key))
+    .reduce((sum, key) => sum + (categoryPointDelta(baseSnapshot, currentSnapshot, key) ?? 0), 0);
+  const totalPointDelta = appTotalPoints(currentSnapshot) - appTotalPoints(baseSnapshot);
+  const inferredStarts = new Set(adherence?.debug?.inferredStarts || []);
+  const activeNow = new Set(adherence?.debug?.activeNowMatches || []);
+  const focusKeys = baseSnapshot.focusTargets || baseSnapshot.targets || [];
+
+  return {
+    targetPointDelta,
+    nonTargetPointDelta,
+    totalPointDelta,
+    gapClosed: gapClosed(baseSnapshot, currentSnapshot),
+    estimatedNextTeamPointDelta: approximateNextTeamPointDelta(baseSnapshot, currentSnapshot),
+    starts: details.map((detail) => {
+      const playerName = detail.playerName || detail.name || "Unknown";
+      const risk = startRiskAssessment({ schedule: detail.schedule, focusKeys });
+      return {
+        playerName,
+        used: inferredStarts.has(playerName) || activeNow.has(playerName),
+        score: toNumber(detail.score),
+        targetCategories: detail.targetCategories || [],
+        schedule: detail.schedule || null,
+        riskFlags: risk.flags,
+        riskPenalty: risk.penalty,
+      };
+    }),
   };
 }
 
@@ -3018,6 +3128,7 @@ function transitionAttribution(fromSnapshot, toSnapshot) {
     valueDelta: categoryValueDelta(fromSnapshot, toSnapshot, key),
   }));
   const adherence = computeStartAdherence(fromSnapshot, toSnapshot);
+  const startOutcome = buildStartOutcomeAttribution(fromSnapshot, toSnapshot);
   const constraints = recommendationConstraints(fromSnapshot);
   const myPointDelta = appTotalPoints(toSnapshot) - appTotalPoints(fromSnapshot);
   const nextTeamPointDelta = approximateNextTeamPointDelta(fromSnapshot, toSnapshot);
@@ -3055,6 +3166,7 @@ function transitionAttribution(fromSnapshot, toSnapshot) {
     targetPointDelta,
     targetDetails,
     adherence,
+    startOutcome,
     constraints,
     drivers,
   };
@@ -3242,6 +3354,16 @@ function rankReviewRecommendations({ transitions, latestTransition, opportunityM
       detail: `Latest gap worsened by ${signedText(-latestTransition.gapClosed)} even though our own point movement was ${signedText(latestTransition.myPointDelta)}; compare this to estimated next-team movement ${signedText(latestTransition.nextTeamPointDelta)}.`,
     });
   }
+  const latestRiskStarts = (latestTransition?.startOutcome?.starts || []).filter(
+    (start) => start.used && start.riskFlags.length > 0
+  );
+  if (latestRiskStarts.length > 0 && latestTransition?.startOutcome?.targetPointDelta <= 0) {
+    recs.push({
+      priority: "medium",
+      title: "Tighten pitcher downside-risk gating",
+      detail: `Used starts with ratio risk did not produce target-category points. Risk starts: ${latestRiskStarts.map((start) => start.playerName).join(", ")}.`,
+    });
+  }
   if (transitions.length > 0 && recs.length === 0) {
     recs.push({
       priority: "low",
@@ -3285,6 +3407,19 @@ function printRankReview(report) {
     console.log(fmtBullet(`Targets ${row.targets.join(", ") || "none"} netted ${signedText(row.targetPointDelta, 1)} category points`));
     if (row.adherence && row.adherence.recommendedCount > 0) {
       console.log(fmtBullet(`Lineup adherence ${row.adherence.matched}/${row.adherence.recommendedCount}`));
+    }
+    if (row.startOutcome) {
+      console.log(
+        fmtBullet(
+          `Start outcome target ${signedText(row.startOutcome.targetPointDelta, 1)}, non-target ${signedText(row.startOutcome.nonTargetPointDelta, 1)}, estimated next-team ${signedText(row.startOutcome.estimatedNextTeamPointDelta, 1)}`
+        )
+      );
+      row.startOutcome.starts
+        .filter((start) => start.riskFlags.length > 0)
+        .slice(0, 3)
+        .forEach((start) => {
+          console.log(fmtBullet(`Start risk ${start.playerName}: ${start.riskFlags.join("; ")}`));
+        });
     }
     if (row.drivers.length > 0) {
       row.drivers.forEach((driver) => console.log(fmtBullet(driver)));
@@ -3563,6 +3698,11 @@ function buildStartScore({ player, focusKeys, statIdByKey, scheduleContext }) {
     } else {
       if (era !== null && era >= 5) score -= 3;
       if (whip !== null && whip >= 1.4) score -= 3;
+    }
+    const downside = startRiskAssessment({ schedule: { era, whip, projectedIp }, focusKeys });
+    if (downside.penalty > 0) {
+      score -= downside.penalty;
+      reasons.push(`downside risk gate -${downside.penalty}: ${downside.flags.join("; ")}`);
     }
     score += (0.5 - opponentPct) * 4;
     reasons.push(`opponent ${game?.opponentAbbr || "unknown"} pct ${opponentPct.toFixed(3)}`);
@@ -4659,6 +4799,9 @@ async function discover() {
 }
 
 async function recommend({ snapshotOnly = false } = {}) {
+  if (!snapshotOnly) {
+    await refreshBenchmarkIfStaleForRecommend();
+  }
   const config = loadConfig();
   const leagueSettingsFile = loadLeagueSettingsFile();
   const accessToken = await getAccessToken(config);
