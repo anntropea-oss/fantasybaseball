@@ -167,6 +167,11 @@ function inferActions(prevSnapshot, currentSnapshot) {
   return { adds, drops, starts, benches };
 }
 
+function mean(values) {
+  if (!Array.isArray(values) || values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
 function linearFit(x, y) {
   const n = x.length;
   if (n === 0) return null;
@@ -185,6 +190,198 @@ function linearFit(x, y) {
   const ssRes = y.reduce((s, v, i) => s + Math.pow(v - yHat[i], 2), 0);
   const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
   return { slope, intercept, r2 };
+}
+
+function r2Score(y, yHat) {
+  if (!Array.isArray(y) || y.length === 0) return null;
+  const meanY = mean(y);
+  const ssTot = y.reduce((sum, value) => sum + Math.pow(value - meanY, 2), 0);
+  const ssRes = y.reduce((sum, value, i) => sum + Math.pow(value - yHat[i], 2), 0);
+  return ssTot > 0 ? 1 - ssRes / ssTot : 0;
+}
+
+function transpose(matrix) {
+  return matrix[0].map((_, col) => matrix.map((row) => row[col]));
+}
+
+function matMul(a, b) {
+  const out = Array.from({ length: a.length }, () => Array(b[0].length).fill(0));
+  for (let i = 0; i < a.length; i += 1) {
+    for (let j = 0; j < b[0].length; j += 1) {
+      let sum = 0;
+      for (let k = 0; k < b.length; k += 1) sum += a[i][k] * b[k][j];
+      out[i][j] = sum;
+    }
+  }
+  return out;
+}
+
+function invertMatrix(matrix) {
+  const n = matrix.length;
+  const aug = matrix.map((row, i) => [
+    ...row,
+    ...Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)),
+  ]);
+  for (let col = 0; col < n; col += 1) {
+    let pivot = col;
+    for (let r = col + 1; r < n; r += 1) {
+      if (Math.abs(aug[r][col]) > Math.abs(aug[pivot][col])) pivot = r;
+    }
+    if (Math.abs(aug[pivot][col]) < 1e-10) return null;
+    if (pivot !== col) [aug[pivot], aug[col]] = [aug[col], aug[pivot]];
+    const div = aug[col][col];
+    for (let c = 0; c < 2 * n; c += 1) aug[col][c] /= div;
+    for (let r = 0; r < n; r += 1) {
+      if (r === col) continue;
+      const factor = aug[r][col];
+      for (let c = 0; c < 2 * n; c += 1) aug[r][c] -= factor * aug[col][c];
+    }
+  }
+  return aug.map((row) => row.slice(n));
+}
+
+function standardizeTrainTest(trainX, testX) {
+  const d = trainX[0]?.length || 0;
+  const means = Array(d).fill(0);
+  const stds = Array(d).fill(1);
+  for (let j = 0; j < d; j += 1) means[j] = mean(trainX.map((row) => row[j] || 0));
+  for (let j = 0; j < d; j += 1) {
+    stds[j] = Math.sqrt(mean(trainX.map((row) => Math.pow((row[j] || 0) - means[j], 2)))) || 1;
+  }
+  const apply = (rows) => rows.map((row) => row.map((value, j) => ((value || 0) - means[j]) / stds[j]));
+  return { train: apply(trainX), test: apply(testX) };
+}
+
+function ridgePredict(trainXRaw, trainY, testXRaw, alpha = 1000) {
+  if (trainXRaw.length === 0 || testXRaw.length === 0) return [];
+  const scaled = standardizeTrainTest(trainXRaw, testXRaw);
+  const trainX = scaled.train.map((row) => [1, ...row]);
+  const testX = scaled.test.map((row) => [1, ...row]);
+  const xt = transpose(trainX);
+  const xtx = matMul(xt, trainX);
+  for (let i = 1; i < xtx.length; i += 1) xtx[i][i] += alpha;
+  xtx[0][0] += 1e-8;
+  const inv = invertMatrix(xtx);
+  if (!inv) return testXRaw.map(() => mean(trainY));
+  const xty = matMul(xt, trainY.map((value) => [value]));
+  const beta = matMul(inv, xty).map((row) => row[0]);
+  return testX.map((row) => row.reduce((sum, value, i) => sum + value * beta[i], 0));
+}
+
+function categoryValue(snapshot, key) {
+  return toNumber(getCategory(snapshot, key)?.value) ?? 0;
+}
+
+function categoryPoints(snapshot, key) {
+  return toNumber(getCategory(snapshot, key)?.points) ?? 0;
+}
+
+function categoryRank(snapshot, key) {
+  return toNumber(getCategory(snapshot, key)?.rank) ?? 0;
+}
+
+function categoryDeltaValue(snapshots, index, key, lag) {
+  const from = Math.max(0, index - lag);
+  if (from >= index) return 0;
+  return categoryValue(snapshots[index], key) - categoryValue(snapshots[from], key);
+}
+
+function categoryModelFeatures(snapshots, index, key, categoryKeys) {
+  const snapshot = snapshots[index];
+  const gap = snapshot?.categoryNextGaps?.[key] || {};
+  const targets = new Set([...(snapshot?.focusTargets || []), ...(snapshot?.targets || [])]);
+  return [
+    ...categoryKeys.map((k) => (k === key ? 1 : 0)),
+    sumPoints(snapshot),
+    toNumber(snapshot?.overallRank) ?? 0,
+    toNumber(snapshot?.pointsToNextTeam?.delta) ?? 0,
+    toNumber(snapshot?.seasonProgress) ?? 0,
+    toNumber(snapshot?.ipValue) ?? 0,
+    categoryPoints(snapshot, key),
+    categoryRank(snapshot, key),
+    categoryValue(snapshot, key),
+    targets.has(key) ? 1 : 0,
+    toNumber(gap.deltaToNext) ?? 0,
+    toNumber(gap.pointsGainToNext) ?? 0,
+    gap.nextTeamKey && gap.nextTeamKey === snapshot?.pointsToNextTeam?.nextTeamKey ? 1 : 0,
+    categoryDeltaValue(snapshots, index, key, 1),
+    categoryDeltaValue(snapshots, index, key, 3),
+    categoryDeltaValue(snapshots, index, key, 7),
+  ];
+}
+
+function categoryDelta(snapshot, nextSnapshot, key, target) {
+  if (target === "value") return categoryValue(nextSnapshot, key) - categoryValue(snapshot, key);
+  return categoryPoints(nextSnapshot, key) - categoryPoints(snapshot, key);
+}
+
+function categoryDeltaScales(snapshots, trainEndIndex, categoryKeys) {
+  const byKey = new Map(categoryKeys.map((key) => [key, []]));
+  for (let i = 0; i < trainEndIndex; i += 1) {
+    categoryKeys.forEach((key) => byKey.get(key).push(categoryDelta(snapshots[i], snapshots[i + 1], key, "value")));
+  }
+  const scales = new Map();
+  byKey.forEach((values, key) => {
+    const m = mean(values);
+    const variance = mean(values.map((value) => Math.pow(value - m, 2)));
+    scales.set(key, Math.sqrt(variance) || 1);
+  });
+  return scales;
+}
+
+function walkForwardCategoryRidge(snapshots, target) {
+  const categoryKeys = snapshots[0]?.categories?.map((cat) => cat.key).filter(Boolean) || [];
+  const minTrainSnapshots = Math.min(20, Math.max(5, snapshots.length - 2));
+  if (categoryKeys.length === 0 || snapshots.length < minTrainSnapshots + 2) return null;
+  const actual = [];
+  const predicted = [];
+  for (let t = minTrainSnapshots; t < snapshots.length - 1; t += 1) {
+    const trainX = [];
+    const trainY = [];
+    const testX = [];
+    const testKeys = [];
+    const scales = target === "value" ? categoryDeltaScales(snapshots, t, categoryKeys) : null;
+    for (let i = 0; i < t; i += 1) {
+      categoryKeys.forEach((key) => {
+        trainX.push(categoryModelFeatures(snapshots, i, key, categoryKeys));
+        const scale = scales?.get(key) || 1;
+        trainY.push(categoryDelta(snapshots[i], snapshots[i + 1], key, target) / scale);
+      });
+    }
+    categoryKeys.forEach((key) => {
+      testX.push(categoryModelFeatures(snapshots, t, key, categoryKeys));
+      testKeys.push(key);
+    });
+    const preds = ridgePredict(trainX, trainY, testX, 1000);
+    preds.forEach((pred, idx) => {
+      const key = testKeys[idx];
+      const scale = scales?.get(key) || 1;
+      predicted.push(target === "value" ? pred : pred);
+      actual.push(categoryDelta(snapshots[t], snapshots[t + 1], key, target) / scale);
+    });
+  }
+  return {
+    r2: r2Score(actual, predicted),
+    n: actual.length,
+  };
+}
+
+function buildRegressionDiagnostics(allSnapshots, pairs) {
+  const x = pairs.map((p) => p.usedStarts);
+  const y = pairs.map((p) => p.deltaTotalPerDay);
+  const toy = x.length >= 2 ? linearFit(x, y) : null;
+  const categoryPoint = walkForwardCategoryRidge(allSnapshots, "points");
+  const categoryValue = walkForwardCategoryRidge(allSnapshots, "value");
+  return {
+    toyStartsR2: toy?.r2 ?? null,
+    toyStartsN: x.length,
+    categoryPointR2: categoryPoint?.r2 ?? null,
+    categoryPointN: categoryPoint?.n ?? 0,
+    categoryValueNormalizedR2: categoryValue?.r2 ?? null,
+    categoryValueN: categoryValue?.n ?? 0,
+    recommendedModel: "category-value forecast + full-standings simulation",
+    note: "The start scatter is a diagnostic only; roto points are threshold events, so prediction should forecast category values first and simulate league point thresholds next.",
+  };
 }
 
 function escapeHtml(str) {
@@ -445,6 +642,7 @@ for (let i = 1; i < filtered.length; i += 1) {
 
 const scatterX = pairs.map((p) => p.usedStarts);
 const scatterY = pairs.map((p) => p.deltaTotalPerDay);
+const regressionDiagnostics = buildRegressionDiagnostics(ordered, pairs);
 const generatedAt = new Date().toISOString();
 const latest = filtered.at(-1) || {};
 const latestContext = latest.featureInputs?.recommendationContext || {};
@@ -465,6 +663,7 @@ const dashboardData = {
     x: scatterX,
     y: scatterY,
   },
+  regressionDiagnostics,
   latest: {
     id: latest.id || null,
     date: latest.date || null,
@@ -701,6 +900,21 @@ const clientJs = String.raw`(() => {
     return html;
   }
 
+  function modelDiagnosticsCard(data) {
+    const d = data.regressionDiagnostics || {};
+    const fmt = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n.toFixed(3) : "n/a";
+    };
+    let html = '<div class="card"><h2 style="font-size:16px;margin:0 0 8px;">Model Diagnostics</h2>';
+    html += '<div><span class="pill">Toy start R2: ' + fmt(d.toyStartsR2) + '</span><span class="pill">Category point R2: ' + fmt(d.categoryPointR2) + '</span><span class="pill">Category value R2: ' + fmt(d.categoryValueNormalizedR2) + '</span></div>';
+    html += '<p class="tiny">Toy start regression uses inferred starts only (n=' + escapeHtml(d.toyStartsN || 0) + ') and is not the predictive model.</p>';
+    html += '<p><strong>Recommended model:</strong> ' + escapeHtml(d.recommendedModel || "category-value forecast + standings simulation") + '</p>';
+    html += '<p class="tiny">' + escapeHtml(d.note || "") + '</p>';
+    html += '</div>';
+    return html;
+  }
+
   function render(data) {
     if (!data) return;
     state = data;
@@ -717,8 +931,9 @@ const clientJs = String.raw`(() => {
       '<div class="row"><div class="card">' + svgLineChart({ title: "Focus Points (Targets + Best Value)", xLabels: data.dates, series: [{ name: "Focus Points", color: "#7c3aed", y: data.focusPoints }] }) + '</div>' +
       '<div class="card">' + svgLineChart({ title: "Saves (SV)", xLabels: data.dates, series: [{ name: "SV", color: "#f59e0b", y: data.saves }] }) + '</div></div>' +
       latestCard(data) +
-      '<div class="card">' + svgScatter({ title: "Regression View: Used Starts vs Delta Total Points/Day", xName: "Recommended starts used (inferred)", yName: "Delta total roto points per day", x: (data.scatter || {}).x || [], y: (data.scatter || {}).y || [] }) +
-      '<div class="tiny">Note: “used starts” is inferred from roster position changes between snapshots; if you do not change BN/active slots every day, this understates adherence.</div></div>';
+      modelDiagnosticsCard(data) +
+      '<div class="card">' + svgScatter({ title: "Toy Diagnostic: Used Starts vs Delta Total Points/Day", xName: "Recommended starts used (inferred)", yName: "Delta total roto points per day", x: (data.scatter || {}).x || [], y: (data.scatter || {}).y || [] }) +
+      '<div class="tiny">This chart is intentionally labeled as a toy diagnostic. It is useful for spotting adherence/outcome weirdness, not for predicting roto-point movement.</div></div>';
   }
 
   async function poll() {

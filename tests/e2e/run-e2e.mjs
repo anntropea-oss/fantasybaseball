@@ -208,8 +208,15 @@ test("dashboard publish writes docs/index.html", async () => {
   assert.equal(data.windowEnd, "2026-05-02");
   assert.ok(Array.isArray(data.dates));
   assert.ok(data.latest.actions.addPitching.includes("Closer Spec"));
+  assert.equal(data.regressionDiagnostics.recommendedModel, "category-value forecast + full-standings simulation");
+  assert.ok(
+    data.regressionDiagnostics.toyStartsR2 === null ||
+      typeof data.regressionDiagnostics.toyStartsR2 === "number"
+  );
   const js = await fsp.readFile(jsPath, "utf8");
   assert.match(js, /setInterval\(poll, REFRESH_MS\)/);
+  assert.match(js, /Model Diagnostics/);
+  assert.match(js, /Toy Diagnostic/);
 });
 
 test("local app exposes stable JSON API contracts", async () => {

@@ -600,6 +600,20 @@ async function getDb() {
         FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS league_category_standings (
+        snapshot_id TEXT NOT NULL,
+        category_key TEXT NOT NULL,
+        stat_id TEXT,
+        team_key TEXT NOT NULL,
+        team_name TEXT,
+        value REAL,
+        points REAL,
+        rank REAL,
+        total_points REAL,
+        PRIMARY KEY (snapshot_id, category_key, team_key),
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS lineup_slots (
         snapshot_id TEXT NOT NULL,
         player_key TEXT NOT NULL,
@@ -744,6 +758,7 @@ async function writeSnapshotToDb(snapshot) {
     [
       "category_standings",
       "category_next_gaps",
+      "league_category_standings",
       "lineup_slots",
       "recommendations",
       "inferred_actions",
@@ -793,6 +808,30 @@ async function writeSnapshotToDb(snapshot) {
           gap.status || null,
         ]
       );
+    });
+
+    (snapshot.leagueStandings?.categories || []).forEach((cat) => {
+      (Array.isArray(cat.teams) ? cat.teams : []).forEach((team) => {
+        if (!team.teamKey) return;
+        runStmt(
+          db,
+          `INSERT INTO league_category_standings (
+            snapshot_id, category_key, stat_id, team_key, team_name,
+            value, points, rank, total_points
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            snapshot.id,
+            cat.key || null,
+            cat.statId || null,
+            team.teamKey,
+            team.teamName || null,
+            toNumber(team.value),
+            toNumber(team.points),
+            toNumber(team.rank),
+            toNumber(team.totalPoints),
+          ]
+        );
+      });
     });
 
     (snapshot.roster || []).forEach((player) => {
@@ -2448,6 +2487,58 @@ function buildStatIdByKey(resolvedCategories) {
   return map;
 }
 
+function buildLeagueStandingsSurface({
+  resolvedCategories,
+  teamMetrics,
+  totalPointsByTeam,
+}) {
+  const teams = Array.isArray(teamMetrics) ? teamMetrics : [];
+  const teamCount = teams.length;
+  return {
+    schemaVersion: 1,
+    categories: (resolvedCategories || [])
+      .filter((cat) => cat?.key && cat?.statId)
+      .map((cat) => {
+        const statId = String(cat.statId);
+        const categoryTeams = teams
+          .map((team) => {
+            const value = toNumber(extractStatValue(team.statsById?.get(statId)));
+            const points = toNumber(extractStatValue(team.pointsById?.get(statId)));
+            const rank =
+              points !== null && teamCount > 0
+                ? Math.round((teamCount - points + 1) * 10) / 10
+                : null;
+            return {
+              teamKey: team.teamKey,
+              teamName: team.teamName,
+              value,
+              points,
+              rank,
+              totalPoints: toNumber(totalPointsByTeam?.get?.(team.teamKey)),
+            };
+          })
+          .filter((team) => team.teamKey)
+          .sort((a, b) => {
+            const ap = toNumber(a.points) ?? -Infinity;
+            const bp = toNumber(b.points) ?? -Infinity;
+            if (bp !== ap) return bp - ap;
+            const av = toNumber(a.value) ?? 0;
+            const bv = toNumber(b.value) ?? 0;
+            return isLowerBetter(cat.key, cat.name) ? av - bv : bv - av;
+          });
+        return {
+          key: cat.key,
+          statId,
+          name: cat.name || cat.key,
+          direction: isLowerBetter(cat.key, cat.name)
+            ? "lower_is_better"
+            : "higher_is_better",
+          teams: categoryTeams,
+        };
+      }),
+  };
+}
+
 function buildSnapshot({
   config,
   overallRank,
@@ -2462,6 +2553,7 @@ function buildSnapshot({
   focusKeys,
   pointsToNextTeam,
   categoryNextGaps,
+  leagueStandings,
   actionSuggestions,
   actionDetails,
   rosterState,
@@ -2493,6 +2585,7 @@ function buildSnapshot({
     ipCap,
     pointsToNextTeam: pointsToNextTeam || null,
     categoryNextGaps: categoryNextGaps || null,
+    leagueStandings: leagueStandings || null,
     targets: Array.isArray(targetKeys) ? targetKeys : [],
     focusTargets: Array.isArray(focusKeys) ? focusKeys : [],
     bestValueTargets,
@@ -4901,6 +4994,11 @@ async function recommend({ snapshotOnly = false } = {}) {
     .map((cat) => cat.statId)
     .filter(Boolean);
   const totalPointsByTeam = computeTotalPoints(teamMetrics, statIdsForTotals);
+  const leagueStandings = buildLeagueStandingsSurface({
+    resolvedCategories,
+    teamMetrics,
+    totalPointsByTeam,
+  });
 
   const rankedCategories = resolvedCategories
     .filter((stat) => stat.rank !== null && !Number.isNaN(stat.rank))
@@ -5375,6 +5473,7 @@ async function recommend({ snapshotOnly = false } = {}) {
       focusKeys,
       pointsToNextTeam,
       categoryNextGaps,
+      leagueStandings,
       actionSuggestions,
       actionDetails,
       rosterState,
@@ -6567,6 +6666,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     focusKeys,
     pointsToNextTeam,
     categoryNextGaps,
+    leagueStandings,
     actionSuggestions,
     actionDetails,
     rosterState,
@@ -7362,6 +7462,7 @@ async function finalizeAndLogRun({
   focusKeys,
   pointsToNextTeam,
   categoryNextGaps,
+  leagueStandings,
   actionSuggestions,
   actionDetails,
   rosterState,
@@ -7382,6 +7483,7 @@ async function finalizeAndLogRun({
     focusKeys,
     pointsToNextTeam,
     categoryNextGaps,
+    leagueStandings,
     actionSuggestions,
     actionDetails,
     rosterState,

@@ -100,6 +100,13 @@ That captures a recommendation, regenerates `docs/index.html`,
 `docs/dashboard-data.json`, and `docs/dashboard.js`, then commits and pushes
 only those dashboard artifacts if they changed.
 
+The dashboard's regression section is intentionally diagnostic, not a champion
+model. The old one-variable "used starts -> total points" fit is shown as a toy
+signal, while the model diagnostics compare it against walk-forward category
+point/value forecasts. Real predictive work should use the category-value
+forecast plus a full-standings threshold simulator, because roto points are
+league-rank threshold events rather than smooth daily outcomes.
+
 9. Run the champion/challenger model benchmark.
 
 ```bash
@@ -167,6 +174,10 @@ team standings discoverable from the authenticated Yahoo account. Useful flags:
   schedule proxies, recommendation counts, add/drop context, archetypes, and
   projection-score coverage. External schedule/projection/news fields are
   explicitly marked as unavailable until a data feed is added.
+- New snapshots also preserve the full league category standings surface under
+  `leagueStandings` and in SQLite `league_category_standings`, so future models
+  can simulate point-gain/loss thresholds instead of relying only on the next
+  gap.
 - Protected players in `doNotDrop` are never recommended as drops unless they
   are hitters on IL/IR and have a recent `injuryDropReviews` entry showing all
   injury news was reviewed and the player is more likely than not out beyond 30

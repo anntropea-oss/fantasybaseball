@@ -185,6 +185,21 @@
     return html;
   }
 
+  function modelDiagnosticsCard(data) {
+    const d = data.regressionDiagnostics || {};
+    const fmt = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n.toFixed(3) : "n/a";
+    };
+    let html = '<div class="card"><h2 style="font-size:16px;margin:0 0 8px;">Model Diagnostics</h2>';
+    html += '<div><span class="pill">Toy start R2: ' + fmt(d.toyStartsR2) + '</span><span class="pill">Category point R2: ' + fmt(d.categoryPointR2) + '</span><span class="pill">Category value R2: ' + fmt(d.categoryValueNormalizedR2) + '</span></div>';
+    html += '<p class="tiny">Toy start regression uses inferred starts only (n=' + escapeHtml(d.toyStartsN || 0) + ') and is not the predictive model.</p>';
+    html += '<p><strong>Recommended model:</strong> ' + escapeHtml(d.recommendedModel || "category-value forecast + standings simulation") + '</p>';
+    html += '<p class="tiny">' + escapeHtml(d.note || "") + '</p>';
+    html += '</div>';
+    return html;
+  }
+
   function render(data) {
     if (!data) return;
     state = data;
@@ -201,8 +216,9 @@
       '<div class="row"><div class="card">' + svgLineChart({ title: "Focus Points (Targets + Best Value)", xLabels: data.dates, series: [{ name: "Focus Points", color: "#7c3aed", y: data.focusPoints }] }) + '</div>' +
       '<div class="card">' + svgLineChart({ title: "Saves (SV)", xLabels: data.dates, series: [{ name: "SV", color: "#f59e0b", y: data.saves }] }) + '</div></div>' +
       latestCard(data) +
-      '<div class="card">' + svgScatter({ title: "Regression View: Used Starts vs Delta Total Points/Day", xName: "Recommended starts used (inferred)", yName: "Delta total roto points per day", x: (data.scatter || {}).x || [], y: (data.scatter || {}).y || [] }) +
-      '<div class="tiny">Note: “used starts” is inferred from roster position changes between snapshots; if you do not change BN/active slots every day, this understates adherence.</div></div>';
+      modelDiagnosticsCard(data) +
+      '<div class="card">' + svgScatter({ title: "Toy Diagnostic: Used Starts vs Delta Total Points/Day", xName: "Recommended starts used (inferred)", yName: "Delta total roto points per day", x: (data.scatter || {}).x || [], y: (data.scatter || {}).y || [] }) +
+      '<div class="tiny">This chart is intentionally labeled as a toy diagnostic. It is useful for spotting adherence/outcome weirdness, not for predicting roto-point movement.</div></div>';
   }
 
   async function poll() {
