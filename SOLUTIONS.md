@@ -141,3 +141,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Open
 - Verification: Ran `node cli.js rank-review --days 21`, inspected benchmark reports through `2026-06-04`, queried Gemma Desktop through the bridge for adversarial critique, and ran an additional 1/3/7-day horizon comparison showing `weakest` still beats baseline/opportunity/direct-next on target-selection metrics while remaining far below oracle and disconnected from action feasibility.
+
+## [2026-06-04 10:34] Dashboard Regression R2 Is Not A Predictive Model
+- Problem: The dashboard regression shows an R2 near 0.02, which makes the model look useless and does not provide a reliable prediction of rank or roto-point improvement.
+- Root Cause: The dashboard fits a one-feature in-sample linear regression from inferred recommended starts used to next-day total roto-point delta over a small recent window. That target is dominated by threshold effects, opponent movement, category interactions, and roster/action constraints. Experiments with richer team-day features still produced negative walk-forward R2, while category-level point movement only reached about 0.04 walk-forward R2 and normalized category-value movement about 0.15, showing that direct total-point regression is structurally the wrong objective.
+- Solution: No dashboard code fix applied yet. Ran controlled experiments comparing dashboard OLS, richer team-day ridge/forest models, category-level point/value regressions, normalized category-value regressions, and a naive two-stage value-to-threshold conversion. Identified the better modeling direction as a two-stage category/player value forecast plus full-league standings simulation, requiring snapshots to persist the full league standings surface instead of only our category values and next gaps.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Reproduced dashboard R2 as 0.0155; ran `node scripts/regression.mjs --days 60 --daily` showing OLS total-points R2 0.06; ran local walk-forward experiments showing best team-day total-point R2 -0.025, daily category-point forest R2 0.043, daily normalized category-value ridge R2 0.149, and naive threshold conversion negative R2.
