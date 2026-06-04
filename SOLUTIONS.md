@@ -37,3 +37,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/docs/index.html`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard-data.json`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: Confirmed `docs/dashboard-data.json` now has `generatedAt` `2026-06-04T13:50:17.302Z`, window `2026-05-06` to `2026-06-04`, latest date `2026-06-04`, and latest starts `Emerson Hancock` and `Bryan Hudson`; confirmed `origin/main:docs/dashboard-data.json` was still May 9 before publishing.
+
+## [2026-06-04 10:51] Publish Honest Regression Diagnostics To Pages
+- Problem: The public dashboard regression card showed a low-R2 toy start-adherence regression without clearly separating it from predictive model diagnostics.
+- Root Cause: GitHub Pages serves tracked `docs/` artifacts from `main`, while the standings-aware diagnostics implementation was developed on `feature/e2e-test-suite`.
+- Solution: Published refreshed `docs/index.html`, `docs/dashboard-data.json`, and `docs/dashboard.js` from the feature branch so the public dashboard shows model diagnostics and labels the old start regression as a toy diagnostic.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/docs/index.html`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard-data.json`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard.js`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: Published data includes `regressionDiagnostics` with toy starts R2 0.026, category point R2 0.011, category value R2 0.111, and latest starts Gordon Graceffo, Michael Soroka, Ronald Acuña Jr.

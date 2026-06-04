@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-04T13:50:17.302Z",
+  "generatedAt": "2026-06-04T14:50:38.300Z",
   "dataSource": "logs/fantasy.db",
   "windowStart": "2026-05-06",
   "windowEnd": "2026-06-04",
@@ -220,7 +220,7 @@
       3,
       2,
       2,
-      3
+      2
     ],
     "y": [
       1.5,
@@ -253,16 +253,27 @@
       -2
     ]
   },
+  "regressionDiagnostics": {
+    "toyStartsR2": 0.02551908500136446,
+    "toyStartsN": 28,
+    "categoryPointR2": 0.011392335740257331,
+    "categoryPointN": 350,
+    "categoryValueNormalizedR2": 0.11103216222545664,
+    "categoryValueN": 350,
+    "recommendedModel": "category-value forecast + full-standings simulation",
+    "note": "The start scatter is a diagnostic only; roto points are threshold events, so prediction should forecast category values first and simulate league point thresholds next."
+  },
   "latest": {
-    "id": "2026-06-04T13:24:44.818Z",
+    "id": "2026-06-04T14:50:22.806Z",
     "date": "2026-06-04",
     "actions": {
       "addBatting": [],
       "addPitching": [],
       "add": [],
       "start": [
-        "Emerson Hancock",
-        "Bryan Hudson"
+        "Gordon Graceffo",
+        "Michael Soroka",
+        "Ronald Acuña Jr."
       ],
       "drop": []
     },
