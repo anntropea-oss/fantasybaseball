@@ -133,3 +133,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/docs/index.html`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard-data.json`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: Confirmed `docs/dashboard-data.json` now has `generatedAt` `2026-06-04T13:50:17.302Z`, window `2026-05-06` to `2026-06-04`, latest date `2026-06-04`, and latest starts `Emerson Hancock` and `Bryan Hudson`; confirmed `origin/main:docs/dashboard-data.json` was still May 9 before publishing.
+
+## [2026-06-04 10:08] Model Evaluation Still Has Target-Action Blind Spots
+- Problem: The current `weakest` target model is the best-performing target selector in tested walk-forward metrics, but rank remains stuck at 12 and the model evaluation can still overstate effectiveness because it scores category target choices separately from whether concrete add/drop/start actions are feasible and beneficial.
+- Root Cause: Benchmark scoring optimizes category-point and rank-aware category gain from snapshot transitions, not an end-to-end decision utility that includes safe-drop availability, waiver/actionability constraints, start-vs-add/drop separation, opponent movement, ratio downside, and multi-day rank movement. The latest review window also shows 11/21 days blocked by add/drop safety, so target-selection quality alone cannot translate into roster upgrades.
+- Solution: No code fix applied yet. Identified next experiments: add an actionability-weighted benchmark, split start-streaming optimization from add/drop target selection, evaluate multi-horizon rank/gap objectives as promotion gates, and test whether resolving safe-drop bottlenecks produces more rank lift than changing target models.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Ran `node cli.js rank-review --days 21`, inspected benchmark reports through `2026-06-04`, queried Gemma Desktop through the bridge for adversarial critique, and ran an additional 1/3/7-day horizon comparison showing `weakest` still beats baseline/opportunity/direct-next on target-selection metrics while remaining far below oracle and disconnected from action feasibility.
