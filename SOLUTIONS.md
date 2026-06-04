@@ -125,3 +125,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/tests/e2e/run-e2e.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` and `node --check tests/e2e/run-e2e.mjs` passed; `node cli.js rank-review --days 14` printed start outcome target 0, non-target -2, estimated next-team +5, and Shota Imanaga high ERA risk; `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed 6/6; `caffeinate -dimsu node cli.js recommend` auto-refreshed stale benchmark reports before target selection and printed the new start outcome/risk lines.
+
+## [2026-06-04 09:52] GitHub Pages Dashboard Served Stale Data
+- Problem: The GitHub Pages dashboard still displayed May 9 data even though the local recommendation/snapshot logs had fresh June 4 data.
+- Root Cause: `recommend` regenerated the local `logs/` dashboard artifacts, but the public Pages app reads tracked files under `docs/`. The repository was on `feature/e2e-test-suite`, while GitHub Pages is configured to serve `main`, so refreshed local data was not published to the Pages source branch.
+- Solution: Regenerated the published dashboard with `node cli.js dashboard --publish` and prepared the refreshed `docs/index.html` and `docs/dashboard-data.json` for publication to `main`.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/docs/index.html`, `/Users/atropea/coding/fantasy baseball/fantasy/docs/dashboard-data.json`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: Confirmed `docs/dashboard-data.json` now has `generatedAt` `2026-06-04T13:50:17.302Z`, window `2026-05-06` to `2026-06-04`, latest date `2026-06-04`, and latest starts `Emerson Hancock` and `Bryan Hudson`; confirmed `origin/main:docs/dashboard-data.json` was still May 9 before publishing.
