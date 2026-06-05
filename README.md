@@ -114,14 +114,20 @@ node cli.js benchmark
 ```
 
 This keeps the current heuristic as the production champion unless a challenger
-beats it across daily and all-runs walk-forward checks on the rank-aware
-objective. The rank-aware score weights category gains by weak categories,
-immediate category gaps, and whether the gain pressures the team directly above
-us, while still tracking raw roto-point gain as a safety check. When a challenger
-qualifies, `recommend` uses that method for target selection and stores the
-active method in each snapshot's `featureInputs.recommendationContext`.
+beats it across daily and all-runs walk-forward checks on the actionability-
+weighted objective. That promotion gate accounts for safe drops, blocked add
+candidates, waiver/roster bottlenecks, start risk, start execution, multi-run
+gap closure, and whether the gain pressures the team directly above us. It still
+tracks rank-aware and raw roto-point gain as safety checks, so a model cannot win
+only by finding categories that look good on paper but are hard to convert into
+actual roster moves. When a challenger qualifies, `recommend` uses that method
+for target selection and stores the active method in each snapshot's
+`featureInputs.recommendationContext`.
 The benchmark also tests a direct-gap `opportunity` challenger, but it is only
 promoted if it beats baseline across the same daily and all-runs checks.
+Start decisions and add/drop decisions are measured separately inside the gate:
+starts are penalized for ratio risk and non-execution, while add/drop targets are
+penalized when there are add candidates but no safe drops available.
 `recommend` automatically refreshes missing or stale benchmark reports before
 choosing targets; set `FANTASY_AUTO_BENCHMARK=0` or pass
 `--no-benchmark-refresh` to skip that startup refresh.

@@ -572,6 +572,178 @@ function scoreTargetsRankAware(snapshot, nextSnapshot, targets) {
   );
 }
 
+function scoreTargetsVsNextTeam(snapshot, nextSnapshot, targets) {
+  const nextTeamKey = snapshot?.pointsToNextTeam?.nextTeamKey || null;
+  if (!nextTeamKey) return 0;
+  return targets.reduce((sum, key) => {
+    const gap = snapshot?.categoryNextGaps?.[key] || {};
+    if (gap.nextTeamKey !== nextTeamKey) return sum;
+    return sum + categoryDelta(snapshot, nextSnapshot, key);
+  }, 0);
+}
+
+function isBenchSelectedPositions(selected) {
+  if (!Array.isArray(selected)) return false;
+  return selected.some((pos) => ["BN", "BE"].includes(String(pos).toUpperCase()));
+}
+
+function inferActions(prevSnapshot, currentSnapshot) {
+  if (!Array.isArray(prevSnapshot?.roster) || !Array.isArray(currentSnapshot?.roster)) return null;
+  const prevMap = new Map(prevSnapshot.roster.map((p) => [p.playerKey, p]));
+  const currMap = new Map(currentSnapshot.roster.map((p) => [p.playerKey, p]));
+  const adds = [];
+  const drops = [];
+  const starts = [];
+  const benches = [];
+  currMap.forEach((curr, key) => {
+    if (!prevMap.has(key)) {
+      adds.push(curr.name);
+      return;
+    }
+    const prev = prevMap.get(key);
+    const prevBench = isBenchSelectedPositions(prev.selected);
+    const currBench = isBenchSelectedPositions(curr.selected);
+    if (prevBench && !currBench) starts.push(curr.name);
+    else if (!prevBench && currBench) benches.push(curr.name);
+  });
+  prevMap.forEach((prev, key) => {
+    if (!currMap.has(key)) drops.push(prev.name);
+  });
+  return { adds, drops, starts, benches };
+}
+
+function activeRosterNames(snapshot) {
+  const names = new Set();
+  (snapshot?.roster || []).forEach((player) => {
+    const slot = String(player.selectedPrimary || "").toUpperCase();
+    if (slot && !["BN", "BE", "IL"].includes(slot)) names.add(player.name);
+  });
+  return names;
+}
+
+function startRiskPenaltyFromSchedule(schedule) {
+  if (!schedule) return 0;
+  const era = toNumber(schedule.era);
+  const whip = toNumber(schedule.whip);
+  const ip = toNumber(schedule.projectedIp) ?? 0;
+  let penalty = 0;
+  if (era !== null) {
+    if (era >= 5.5) penalty += 8;
+    else if (era >= 4.5) penalty += 4;
+  }
+  if (whip !== null) {
+    if (whip >= 1.45) penalty += 8;
+    else if (whip >= 1.3) penalty += 4;
+  }
+  if (ip >= 4 && penalty > 0) penalty += 4;
+  return penalty;
+}
+
+function recommendedStartDetails(snapshot) {
+  const details = [
+    ...(snapshot?.actionDetails?.start || []),
+    ...(snapshot?.featureInputs?.recommendationContext?.startDiagnostics?.candidates || [])
+      .filter((candidate) => (snapshot?.actions?.start || []).includes(candidate.name))
+      .map((candidate) => ({
+        playerName: candidate.name,
+        schedule: candidate.schedule || null,
+      })),
+  ];
+  const byName = new Map();
+  details.forEach((detail) => {
+    const name = detail.playerName || detail.name;
+    if (!name || byName.has(name)) return;
+    byName.set(name, detail);
+  });
+  return [...byName.values()];
+}
+
+function actionabilityDiagnostics(snapshot, nextSnapshot) {
+  const rec = snapshot?.featureInputs?.recommendationContext || {};
+  const counts = rec.counts || {};
+  const candidatePool = rec.candidatePool || {};
+  const diagnostics = rec.dropDiagnostics || {};
+  const actions = snapshot?.actions || {};
+  const countAdds =
+    (counts.add || 0) +
+    (counts.addBatting || 0) +
+    (counts.addPitching || 0);
+  const actionAdds =
+    (actions.add?.length || 0) +
+    (actions.addBatting?.length || 0) +
+    (actions.addPitching?.length || 0);
+  const recommendedAdds = countAdds || actionAdds;
+  const recommendedStarts = (counts.start || 0) || (actions.start?.length || 0);
+  const addCandidateCount =
+    toNumber(diagnostics.addCandidateCount) ??
+    toNumber(candidatePool.adds) ??
+    recommendedAdds;
+  const safeDropCandidates =
+    toNumber(diagnostics.safeDropCandidates) ??
+    toNumber(candidatePool.drops) ??
+    (actions.drop?.length || 0);
+  const blockedAddCandidates = Array.isArray(diagnostics.blockedAddCandidates)
+    ? diagnostics.blockedAddCandidates.length
+    : 0;
+  const blockedProtectedDrops = Array.isArray(diagnostics.blockedProtectedDrops)
+    ? diagnostics.blockedProtectedDrops.length
+    : 0;
+  const addBlockedByDrops = addCandidateCount > 0 && safeDropCandidates === 0;
+  const startDetails = recommendedStartDetails(snapshot);
+  const startRiskPenalty = startDetails.reduce(
+    (sum, detail) => sum + startRiskPenaltyFromSchedule(detail.schedule),
+    0
+  );
+  const inferred = inferActions(snapshot, nextSnapshot);
+  const activeNow = activeRosterNames(nextSnapshot);
+  const recommendedStartNames = Array.isArray(actions.start) ? actions.start : [];
+  const matchedStarts = recommendedStartNames.filter(
+    (name) => (inferred?.starts || []).includes(name) || activeNow.has(name)
+  ).length;
+  const startExecutionRate =
+    recommendedStartNames.length > 0 ? matchedStarts / recommendedStartNames.length : 1;
+
+  const addDropActionability =
+    addCandidateCount > 0
+      ? safeDropCandidates > 0
+        ? 1
+        : 0.35
+      : 0.75;
+  const blockedPenalty = Math.min(0.25, blockedAddCandidates * 0.08 + blockedProtectedDrops * 0.08);
+  const startRiskFactor =
+    recommendedStarts > 0
+      ? Math.max(0.35, 1 - startRiskPenalty / Math.max(12, recommendedStarts * 12))
+      : 0.9;
+  const executionFactor = Math.max(0.35, startExecutionRate);
+  const weight = Math.max(
+    0.2,
+    Math.min(1.1, 0.45 * addDropActionability + 0.3 * startRiskFactor + 0.25 * executionFactor - blockedPenalty)
+  );
+
+  return {
+    weight,
+    addDropActionability,
+    startRiskFactor,
+    executionFactor,
+    addBlockedByDrops,
+    blockedAddCandidates,
+    blockedProtectedDrops,
+    safeDropCandidates,
+    addCandidateCount,
+    recommendedAdds,
+    recommendedStarts,
+    startRiskPenalty,
+    startExecutionRate,
+  };
+}
+
+function scoreTargetsActionabilityWeighted(snapshot, nextSnapshot, targets, actionability = null) {
+  const diagnostics = actionability || actionabilityDiagnostics(snapshot, nextSnapshot);
+  const rankAwareGain = scoreTargetsRankAware(snapshot, nextSnapshot, targets);
+  const directNextGain = scoreTargetsVsNextTeam(snapshot, nextSnapshot, targets);
+  return rankAwareGain * diagnostics.weight + directNextGain * 0.35;
+}
+
 function oracleTargetsRankAware(snapshot, nextSnapshot, categoryKeys, topN) {
   return categoryKeys
     .map((key) => [key, categoryDelta(snapshot, nextSnapshot, key) * categoryRankAwareWeight(snapshot, key)])
@@ -630,10 +802,17 @@ function evaluate(rows) {
   const rankAwareGains = rows.map((r) => r.rankAwareGain);
   const rankAwareOracleGains = rows.map((r) => r.rankAwareOracleGain);
   const rankAwareRegrets = rows.map((r) => r.rankAwareOracleGain - r.rankAwareGain);
+  const actionabilityWeightedGains = rows.map((r) => r.actionabilityWeightedGain);
+  const actionabilityWeightedOracleGains = rows.map((r) => r.actionabilityWeightedOracleGain);
+  const actionabilityWeightedRegrets = rows.map(
+    (r) => r.actionabilityWeightedOracleGain - r.actionabilityWeightedGain
+  );
+  const directNextGains = rows.map((r) => r.directNextGain);
   const nextGapGains = rows.map((r) => r.nextGapGain).filter((v) => v !== null);
   const rankGains = rows.map((r) => r.rankGain).filter((v) => v !== null);
   const positiveOracleRows = rows.filter((r) => r.oracleGain > 0);
   const positiveRankAwareOracleRows = rows.filter((r) => r.rankAwareOracleGain > 0);
+  const positiveActionabilityOracleRows = rows.filter((r) => r.actionabilityWeightedOracleGain > 0);
   const pickCount = rows.reduce((sum, r) => sum + r.targets.length, 0);
   const positivePicks = rows.reduce(
     (sum, r) => sum + r.targets.filter((key) => r.categoryDeltas[key] > 0).length,
@@ -649,8 +828,21 @@ function evaluate(rows) {
     medianRankAwareGain: median(rankAwareGains),
     meanRankAwareOracleGain: mean(rankAwareOracleGains),
     meanRankAwareRegret: mean(rankAwareRegrets),
+    meanActionabilityWeightedGain: mean(actionabilityWeightedGains),
+    medianActionabilityWeightedGain: median(actionabilityWeightedGains),
+    meanActionabilityWeightedOracleGain: mean(actionabilityWeightedOracleGains),
+    meanActionabilityWeightedRegret: mean(actionabilityWeightedRegrets),
+    meanDirectNextGain: mean(directNextGains),
     meanNextGapGain: mean(nextGapGains),
     meanRankGain: mean(rankGains),
+    meanActionabilityWeight: mean(rows.map((r) => r.actionabilityWeight)),
+    blockedRate:
+      rows.length > 0 ? rows.filter((r) => r.addBlockedByDrops).length / rows.length : 0,
+    meanStartRiskPenalty: mean(rows.map((r) => r.startRiskPenalty)),
+    meanStartExecutionRate: mean(rows.map((r) => r.startExecutionRate)),
+    meanAddDropActionability: mean(rows.map((r) => r.addDropActionability)),
+    meanStartRiskFactor: mean(rows.map((r) => r.startRiskFactor)),
+    meanExecutionFactor: mean(rows.map((r) => r.executionFactor)),
     rankImproveRate:
       rankGains.length > 0 ? rankGains.filter((value) => value > 0).length / rankGains.length : 0,
     captureRate:
@@ -661,8 +853,18 @@ function evaluate(rows) {
       positiveRankAwareOracleRows.length > 0
         ? mean(positiveRankAwareOracleRows.map((r) => r.rankAwareGain / r.rankAwareOracleGain))
         : 0,
+    actionabilityWeightedCaptureRate:
+      positiveActionabilityOracleRows.length > 0
+        ? mean(
+            positiveActionabilityOracleRows.map(
+              (r) => r.actionabilityWeightedGain / r.actionabilityWeightedOracleGain
+            )
+          )
+        : 0,
     positiveDayRate: rows.filter((r) => r.gain > 0).length / rows.length,
     positiveRankAwareDayRate: rows.filter((r) => r.rankAwareGain > 0).length / rows.length,
+    positiveActionabilityWeightedDayRate:
+      rows.filter((r) => r.actionabilityWeightedGain > 0).length / rows.length,
     nonNegativeDayRate: rows.filter((r) => r.gain >= 0).length / rows.length,
     pickHitRate: pickCount > 0 ? positivePicks / pickCount : 0,
   };
@@ -719,10 +921,17 @@ async function runBenchmark(snapshots, args) {
     const snapshot = snapshots[t];
     const nextSnapshot = snapshots[t + 1];
     const deltas = Object.fromEntries(categoryKeys.map((key) => [key, categoryDelta(snapshot, nextSnapshot, key)]));
+    const actionability = actionabilityDiagnostics(snapshot, nextSnapshot);
     const oracle = oracleTargets(snapshot, nextSnapshot, categoryKeys, args.topN);
     const rankAwareOracle = oracleTargetsRankAware(snapshot, nextSnapshot, categoryKeys, args.topN);
     const oracleGain = scoreTargets(snapshot, nextSnapshot, oracle);
     const rankAwareOracleGain = scoreTargetsRankAware(snapshot, nextSnapshot, rankAwareOracle);
+    const actionabilityWeightedOracleGain = scoreTargetsActionabilityWeighted(
+      snapshot,
+      nextSnapshot,
+      rankAwareOracle,
+      actionability
+    );
     const baseline = (snapshot.focusTargets || snapshot.targets || []).slice(0, args.topN);
     const weakest = categoryKeys
       .map((key) => [key, categoryMap(snapshot).get(key)?.points ?? 0])
@@ -792,10 +1001,27 @@ async function runBenchmark(snapshots, args) {
         targets,
         gain: scoreTargets(snapshot, nextSnapshot, targets),
         rankAwareGain: scoreTargetsRankAware(snapshot, nextSnapshot, targets),
+        actionabilityWeightedGain: scoreTargetsActionabilityWeighted(
+          snapshot,
+          nextSnapshot,
+          targets,
+          actionability
+        ),
+        directNextGain: scoreTargetsVsNextTeam(snapshot, nextSnapshot, targets),
         oracleTargets: oracle,
         rankAwareOracleTargets: rankAwareOracle,
         oracleGain,
         rankAwareOracleGain,
+        actionabilityWeightedOracleGain,
+        actionabilityWeight: actionability.weight,
+        addDropActionability: actionability.addDropActionability,
+        startRiskFactor: actionability.startRiskFactor,
+        executionFactor: actionability.executionFactor,
+        addBlockedByDrops: actionability.addBlockedByDrops,
+        blockedAddCandidates: actionability.blockedAddCandidates,
+        safeDropCandidates: actionability.safeDropCandidates,
+        startRiskPenalty: actionability.startRiskPenalty,
+        startExecutionRate: actionability.startExecutionRate,
         nextGapGain: nextGapGain(snapshot, nextSnapshot),
         rankGain: overallRankGain(snapshot, nextSnapshot),
         categoryDeltas: deltas,
@@ -857,6 +1083,12 @@ const summary = {
           metrics.meanRankAwareGain - baseline.meanRankAwareGain,
         deltaRankAwareRegretVsBaseline:
           baseline.meanRankAwareRegret - metrics.meanRankAwareRegret,
+        deltaActionabilityWeightedGainVsBaseline:
+          metrics.meanActionabilityWeightedGain - baseline.meanActionabilityWeightedGain,
+        deltaActionabilityWeightedRegretVsBaseline:
+          baseline.meanActionabilityWeightedRegret - metrics.meanActionabilityWeightedRegret,
+        deltaDirectNextGainVsBaseline:
+          metrics.meanDirectNextGain - baseline.meanDirectNextGain,
       },
     ])
   ),
@@ -869,10 +1101,10 @@ fs.writeFileSync(outJson, JSON.stringify(summary, null, 2));
 console.log("Deep model benchmark complete.");
 console.log(`Mode: ${summary.window.mode}, snapshots: ${summary.window.snapshots}, window: ${summary.window.from} -> ${summary.window.to}`);
 Object.entries(summary.methods)
-  .sort((a, b) => b[1].meanRankAwareGain - a[1].meanRankAwareGain)
+  .sort((a, b) => b[1].meanActionabilityWeightedGain - a[1].meanActionabilityWeightedGain)
   .forEach(([method, m]) => {
     console.log(
-      `${method}: rankAware=${m.meanRankAwareGain.toFixed(3)} raw=${m.meanGain.toFixed(3)} regret=${m.meanRankAwareRegret.toFixed(3)} capture=${(m.rankAwareCaptureRate * 100).toFixed(1)}% hit=${(m.pickHitRate * 100).toFixed(1)}% delta=${m.deltaRankAwareGainVsBaseline.toFixed(3)}`
+      `${method}: action=${m.meanActionabilityWeightedGain.toFixed(3)} rankAware=${m.meanRankAwareGain.toFixed(3)} raw=${m.meanGain.toFixed(3)} regret=${m.meanActionabilityWeightedRegret.toFixed(3)} directNext=${m.meanDirectNextGain.toFixed(3)} blocked=${(m.blockedRate * 100).toFixed(1)}% capture=${(m.actionabilityWeightedCaptureRate * 100).toFixed(1)}% hit=${(m.pickHitRate * 100).toFixed(1)}% delta=${m.deltaActionabilityWeightedGainVsBaseline.toFixed(3)}`
     );
   });
 console.log(`Report: ${outJson}`);

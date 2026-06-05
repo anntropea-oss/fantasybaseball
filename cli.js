@@ -173,17 +173,32 @@ function benchmarkMethodRows(report) {
       meanRankAwareGain: toNumber(metrics.meanRankAwareGain) ?? 0,
       meanRegret: toNumber(metrics.meanRegret) ?? 0,
       meanRankAwareRegret: toNumber(metrics.meanRankAwareRegret) ?? 0,
+      meanActionabilityWeightedGain: toNumber(metrics.meanActionabilityWeightedGain) ?? 0,
+      meanActionabilityWeightedRegret: toNumber(metrics.meanActionabilityWeightedRegret) ?? 0,
+      meanDirectNextGain: toNumber(metrics.meanDirectNextGain) ?? 0,
+      meanActionabilityWeight: toNumber(metrics.meanActionabilityWeight) ?? 0,
+      blockedRate: toNumber(metrics.blockedRate) ?? 0,
+      meanStartRiskPenalty: toNumber(metrics.meanStartRiskPenalty) ?? 0,
+      meanStartExecutionRate: toNumber(metrics.meanStartExecutionRate) ?? 0,
       deltaMeanGainVsBaseline: toNumber(metrics.deltaMeanGainVsBaseline) ?? 0,
       deltaRankAwareGainVsBaseline: toNumber(metrics.deltaRankAwareGainVsBaseline) ?? 0,
+      deltaActionabilityWeightedGainVsBaseline:
+        toNumber(metrics.deltaActionabilityWeightedGainVsBaseline) ?? 0,
       deltaRegretVsBaseline: toNumber(metrics.deltaRegretVsBaseline) ?? 0,
       deltaRankAwareRegretVsBaseline: toNumber(metrics.deltaRankAwareRegretVsBaseline) ?? 0,
+      deltaActionabilityWeightedRegretVsBaseline:
+        toNumber(metrics.deltaActionabilityWeightedRegretVsBaseline) ?? 0,
+      deltaDirectNextGainVsBaseline: toNumber(metrics.deltaDirectNextGainVsBaseline) ?? 0,
       n: toNumber(metrics.n) ?? 0,
     }));
 }
 
 function benchmarkBestChallenger(report) {
   const rows = benchmarkMethodRows(report).sort(
-    (a, b) => b.deltaRankAwareGainVsBaseline - a.deltaRankAwareGainVsBaseline
+    (a, b) =>
+      b.deltaActionabilityWeightedGainVsBaseline - a.deltaActionabilityWeightedGainVsBaseline ||
+      b.deltaRankAwareGainVsBaseline - a.deltaRankAwareGainVsBaseline ||
+      b.deltaDirectNextGainVsBaseline - a.deltaDirectNextGainVsBaseline
   );
   return rows[0] || null;
 }
@@ -199,20 +214,36 @@ function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
     toNumber(daily.deltaRankAwareGainVsBaseline) ?? -Infinity;
   const allRankAwareDelta =
     toNumber(allRuns.deltaRankAwareGainVsBaseline) ?? -Infinity;
+  const dailyActionabilityDelta =
+    toNumber(daily.deltaActionabilityWeightedGainVsBaseline) ?? -Infinity;
+  const allActionabilityDelta =
+    toNumber(allRuns.deltaActionabilityWeightedGainVsBaseline) ?? -Infinity;
+  const dailyDirectNextDelta = toNumber(daily.deltaDirectNextGainVsBaseline) ?? -Infinity;
+  const allDirectNextDelta = toNumber(allRuns.deltaDirectNextGainVsBaseline) ?? -Infinity;
+  const dailyActionabilityWeight = toNumber(daily.meanActionabilityWeight) ?? 0;
+  const allActionabilityWeight = toNumber(allRuns.meanActionabilityWeight) ?? 0;
   const dailyN = toNumber(daily.n) ?? 0;
   const dailyRegretDelta =
+    toNumber(daily.deltaActionabilityWeightedRegretVsBaseline) ??
     toNumber(daily.deltaRankAwareRegretVsBaseline) ??
     toNumber(daily.deltaRegretVsBaseline) ??
     -Infinity;
   const allRegretDelta =
+    toNumber(allRuns.deltaActionabilityWeightedRegretVsBaseline) ??
     toNumber(allRuns.deltaRankAwareRegretVsBaseline) ??
     toNumber(allRuns.deltaRegretVsBaseline) ??
     -Infinity;
   return (
+    dailyActionabilityDelta > 0.1 &&
+    allActionabilityDelta > 0.03 &&
     dailyRankAwareDelta > 0.15 &&
     allRankAwareDelta > 0.05 &&
     dailyDelta >= -0.05 &&
     allDelta >= -0.05 &&
+    dailyDirectNextDelta >= 0 &&
+    allDirectNextDelta >= 0 &&
+    dailyActionabilityWeight >= 0.45 &&
+    allActionabilityWeight >= 0.45 &&
     dailyN >= 20 &&
     dailyRegretDelta >= 0 &&
     allRegretDelta >= 0
@@ -292,10 +323,13 @@ function benchmarkModelStatusLines() {
   );
   if (dailyBaseline) {
     lines.push(
-      `Daily top-3 baseline rank-aware gain ${formatSigned(
-        dailyBaseline.meanRankAwareGain ?? dailyBaseline.meanGain
-      )}; raw ${formatSigned(dailyBaseline.meanGain)}; regret ${
+      `Daily top-3 baseline actionability-weighted gain ${formatSigned(
+        dailyBaseline.meanActionabilityWeightedGain ??
+          dailyBaseline.meanRankAwareGain ??
+          dailyBaseline.meanGain
+      )}; rank-aware ${formatSigned(dailyBaseline.meanRankAwareGain ?? dailyBaseline.meanGain)}; raw ${formatSigned(dailyBaseline.meanGain)}; regret ${
         (
+          toNumber(dailyBaseline.meanActionabilityWeightedRegret) ??
           toNumber(dailyBaseline.meanRankAwareRegret) ??
           toNumber(dailyBaseline.meanRegret) ??
           0
@@ -304,29 +338,48 @@ function benchmarkModelStatusLines() {
     );
   }
   if (dailyOracle && dailyBaseline) {
+    const actionabilityOracleGap =
+      (toNumber(dailyOracle.meanActionabilityWeightedGain) ??
+        toNumber(dailyOracle.meanRankAwareGain) ??
+        toNumber(dailyOracle.meanGain) ??
+        0) -
+      (toNumber(dailyBaseline.meanActionabilityWeightedGain) ??
+        toNumber(dailyBaseline.meanRankAwareGain) ??
+        toNumber(dailyBaseline.meanGain) ??
+        0);
     const rankAwareOracleGap =
       (toNumber(dailyOracle.meanRankAwareGain) ?? toNumber(dailyOracle.meanGain) ?? 0) -
       (toNumber(dailyBaseline.meanRankAwareGain) ?? toNumber(dailyBaseline.meanGain) ?? 0);
     const rawOracleGap =
       (toNumber(dailyOracle.meanGain) ?? 0) - (toNumber(dailyBaseline.meanGain) ?? 0);
     lines.push(
-      `Rank-aware oracle gap: ${formatSigned(rankAwareOracleGap)} weighted points per evaluated snapshot; raw gap ${formatSigned(rawOracleGap)}.`
+      `Actionability oracle gap: ${formatSigned(actionabilityOracleGap)} executable weighted points per evaluated snapshot; rank-aware gap ${formatSigned(rankAwareOracleGap)}; raw gap ${formatSigned(rawOracleGap)}.`
     );
   }
   if (best) {
-    const allDelta = allRuns?.methods?.[best.method]?.deltaRankAwareGainVsBaseline;
+    const allDelta =
+      allRuns?.methods?.[best.method]?.deltaActionabilityWeightedGainVsBaseline ??
+      allRuns?.methods?.[best.method]?.deltaRankAwareGainVsBaseline;
     const allText = allDelta !== undefined ? `, all-runs ${formatSigned(allDelta)}` : "";
     lines.push(
-      `Closest challenger: ${best.method} rank-aware daily ${formatSigned(
-        best.deltaRankAwareGainVsBaseline
-      )}${allText} vs baseline.`
+      `Closest challenger: ${best.method} actionability daily ${formatSigned(
+        best.deltaActionabilityWeightedGainVsBaseline
+      )}${allText} vs baseline; direct-team-above daily ${formatSigned(
+        best.deltaDirectNextGainVsBaseline
+      )}.`
     );
   }
   if (allBaseline) {
     lines.push(
-      `All-runs sensitivity baseline rank-aware gain ${formatSigned(
-        allBaseline.meanRankAwareGain ?? allBaseline.meanGain
-      )}.`
+      `All-runs sensitivity baseline actionability-weighted gain ${formatSigned(
+        allBaseline.meanActionabilityWeightedGain ??
+          allBaseline.meanRankAwareGain ??
+          allBaseline.meanGain
+      )}; safe-drop blocked rate ${(((toNumber(allBaseline.blockedRate) ?? 0) * 100)).toFixed(
+        0
+      )}%; start execution ${(((toNumber(allBaseline.meanStartExecutionRate) ?? 0) * 100)).toFixed(
+        0
+      )}%.`
     );
   }
   return lines;
