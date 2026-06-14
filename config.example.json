@@ -8,6 +8,7 @@
   "doNotDrop": [],
   "doNotAdd": [],
   "unavailableAdds": [],
+  "recentDropAddCooldownDays": 3,
   "protectedInjuryReviewMaxAgeDays": 7,
   "injuryDropReviews": [],
   "gameKey": "mlb",

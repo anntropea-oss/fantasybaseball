@@ -165,3 +165,51 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js`, `node --check scripts/model-benchmark-deep.mjs`, and `node --check tests/e2e/run-e2e.mjs` passed; `caffeinate -dimsu node cli.js benchmark` completed daily and all-runs reports with actionability-weighted metrics; `weakest` was the closest challenger but stayed below champion promotion because it reduced direct next-team pressure; `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed 6/6.
+
+## [2026-06-13 10:31] Block Non-Executable Oneil Cruz Add
+- Problem: The June 13 recommendation suggested adding Oneil Cruz, but the move was not executable because the user had already dropped him and Yahoo did not allow the immediate re-add from the current roster state.
+- Root Cause: The Yahoo player pool exposed Cruz as an add candidate, but the recommender did not know about the user/UI transaction-state constraint created by the prior drop.
+- Solution: Added Oneil Cruz to `config.json` `unavailableAdds` with a local reason so future add recommendations filter him out until the block is removed. Reran `node cli.js recommend`, which replaced the non-executable Cruz add with Ildemaro Vargas.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/config.json`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `caffeinate -dimsu node cli.js recommend` completed after the block was added and recommended `Ildemaro Vargas [Average] (1B, 2B) -> drop Nolan Gorman` instead of Cruz.
+
+## [2026-06-14 10:43] Gemma Bridge Review Returned Empty Responses
+- Problem: A request to have Gemma Desktop review the fantasy baseball codebase did not produce a usable review. The first request sat unprocessed until Gemma Desktop was launched; after launch, Gemma returned an empty response for the full review, said it needed source code for a path-only prompt, returned only `This` for a targeted excerpt review, and returned another empty response for a tiny add-filter review.
+- Root Cause: Unknown. The bridge can receive requests and write response files, but Gemma Desktop is returning empty or truncated content for code-review prompts.
+- Solution: No code fix applied. Verified the bridge request/response files and launched Gemma Desktop manually with `open -a "Gemma Desktop"`; left the failed request/response artifacts in the Gemma bridge for inspection.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Observed response files for `request-1781447885`, `code-review-1781448112`, `targeted-review-1781448156756`, and `tiny-review-1781448191631`; none contained a usable code review.
+
+## [2026-06-14 11:07] Missing Automatic Recent-Drop Add Cooldown
+- Problem: Gemma review identified that the Cruz fix relies on manually adding a player to `config.json` `unavailableAdds`, but the recommender still has no automatic cooldown that blocks recently dropped players from being recommended for immediate re-add.
+- Root Cause: Add filtering only checks configured `doNotAdd` and `unavailableAdds` blocks via `getAddBlock`; it does not derive temporary add blocks from inferred or logged drop transactions.
+- Solution: No code fix applied yet. Recommended fix is to derive recent-drop blocks from `logs/actions.jsonl`, inferred roster transitions, or Yahoo transaction state, and suppress re-add recommendations for a configurable cooldown window unless explicitly overridden.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Gemma reviewed the add-block helper and candidate filter excerpts after rebuild; confirmed the current logic only checks explicit config blocks, while the June 13 Cruz incident required a manual `unavailableAdds` entry.
+
+## [2026-06-14 11:07] Benchmark And Actionability Thresholds Are Hardcoded
+- Problem: Gemma review flagged that champion promotion thresholds and actionability-weight formula constants are hardcoded, making future tuning error-prone and hard to audit.
+- Root Cause: `benchmarkQualifiesAsChampion` and `actionabilityDiagnostics` embed numeric cutoffs and weights directly in code instead of using named constants or documented config.
+- Solution: No code fix applied yet. Recommended fix is to extract these thresholds into named constants with comments or a model config object, then include the active threshold config in benchmark reports for auditability.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Gemma reviewed the benchmark gate and actionability scoring excerpts; false positives about `toNumber` and missing null guards were rejected against the full file, but the hardcoded-threshold finding is valid.
+
+## [2026-06-14 11:32] Add Automatic Recent-Drop Re-Add Cooldown
+- Problem: The recommender could suggest re-adding a player immediately after the user dropped him unless that player was manually added to `config.json` `unavailableAdds`, as happened with Oneil Cruz.
+- Root Cause: Add filtering only considered explicit `doNotAdd` and `unavailableAdds` config blocks. It did not derive temporary add blocks from recent logged or inferred drop transactions.
+- Solution: Added `recentDropAddCooldownDays` with a default of 3 days, inferred recent add/drop events from `logs/actions.jsonl` and snapshot `inferredActionsFromPrev`, and extended `getAddBlock` to merge explicit blocks with recent-drop cooldown blocks. Added blocked-player source/droppedAt diagnostics and documented the setting.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/config.example.json`, `/Users/atropea/coding/fantasy baseball/fantasy/README.md`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` passed; `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed 6/6; `FANTASY_AUTO_BENCHMARK=0 caffeinate -dimsu node cli.js recommend --no-dashboard` recommended `Trent Grisham -> drop Ildemaro Vargas` and did not recommend Oneil Cruz.
+
+## [2026-06-14 11:32] Extract Benchmark And Actionability Gate Constants
+- Problem: Champion promotion thresholds and actionability-weight formula values were embedded directly in code, making model tuning hard to audit and easy to change inconsistently.
+- Root Cause: `benchmarkQualifiesAsChampion` and `scripts/model-benchmark-deep.mjs` used inline numeric cutoffs for promotion, start-risk penalties, actionability weighting, and direct-next gain weighting.
+- Solution: Extracted promotion gate thresholds, actionability weights, and start-risk thresholds into named constants. Benchmark JSON reports now include the active actionability/start-risk config, and CLI benchmark annotation/history includes the active promotion gate config.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js` and `node --check scripts/model-benchmark-deep.mjs` passed; `caffeinate -dimsu node cli.js benchmark` completed daily and all-runs reports, and `logs/model-benchmark-deep-daily-top3-train10.json` includes `modelConfig.actionabilityWeights`, `modelConfig.startRiskThresholds`, and `modelConfig.promotionGate`.

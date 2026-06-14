@@ -4,6 +4,34 @@ import path from "path";
 const ROOT = process.cwd();
 const SNAPSHOT_PATH = path.join(ROOT, "logs", "snapshots.jsonl");
 const DB_PATH = path.join(ROOT, "logs", "fantasy.db");
+const ACTIONABILITY_WEIGHTS = {
+  addDropWeight: 0.45,
+  startRiskWeight: 0.3,
+  executionWeight: 0.25,
+  noSafeDropActionability: 0.35,
+  noAddCandidateActionability: 0.75,
+  maxBlockedPenalty: 0.25,
+  blockedAddPenalty: 0.08,
+  blockedProtectedDropPenalty: 0.08,
+  noStartRiskFactor: 0.9,
+  minStartRiskFactor: 0.35,
+  minStartRiskPenaltyDenominator: 12,
+  startRiskPenaltyDenominatorPerStart: 12,
+  minExecutionFactor: 0.35,
+  minWeight: 0.2,
+  maxWeight: 1.1,
+  directNextGainWeight: 0.35,
+};
+const START_RISK_THRESHOLDS = {
+  highEra: 5.5,
+  elevatedEra: 4.5,
+  highWhip: 1.45,
+  elevatedWhip: 1.3,
+  bulkIp: 4,
+  highPenalty: 8,
+  elevatedPenalty: 4,
+  bulkExposurePenalty: 4,
+};
 
 function parseArgs(argv) {
   const args = {
@@ -628,14 +656,16 @@ function startRiskPenaltyFromSchedule(schedule) {
   const ip = toNumber(schedule.projectedIp) ?? 0;
   let penalty = 0;
   if (era !== null) {
-    if (era >= 5.5) penalty += 8;
-    else if (era >= 4.5) penalty += 4;
+    if (era >= START_RISK_THRESHOLDS.highEra) penalty += START_RISK_THRESHOLDS.highPenalty;
+    else if (era >= START_RISK_THRESHOLDS.elevatedEra) penalty += START_RISK_THRESHOLDS.elevatedPenalty;
   }
   if (whip !== null) {
-    if (whip >= 1.45) penalty += 8;
-    else if (whip >= 1.3) penalty += 4;
+    if (whip >= START_RISK_THRESHOLDS.highWhip) penalty += START_RISK_THRESHOLDS.highPenalty;
+    else if (whip >= START_RISK_THRESHOLDS.elevatedWhip) penalty += START_RISK_THRESHOLDS.elevatedPenalty;
   }
-  if (ip >= 4 && penalty > 0) penalty += 4;
+  if (ip >= START_RISK_THRESHOLDS.bulkIp && penalty > 0) {
+    penalty += START_RISK_THRESHOLDS.bulkExposurePenalty;
+  }
   return penalty;
 }
 
@@ -707,17 +737,35 @@ function actionabilityDiagnostics(snapshot, nextSnapshot) {
     addCandidateCount > 0
       ? safeDropCandidates > 0
         ? 1
-        : 0.35
-      : 0.75;
-  const blockedPenalty = Math.min(0.25, blockedAddCandidates * 0.08 + blockedProtectedDrops * 0.08);
+        : ACTIONABILITY_WEIGHTS.noSafeDropActionability
+      : ACTIONABILITY_WEIGHTS.noAddCandidateActionability;
+  const blockedPenalty = Math.min(
+    ACTIONABILITY_WEIGHTS.maxBlockedPenalty,
+    blockedAddCandidates * ACTIONABILITY_WEIGHTS.blockedAddPenalty +
+      blockedProtectedDrops * ACTIONABILITY_WEIGHTS.blockedProtectedDropPenalty
+  );
   const startRiskFactor =
     recommendedStarts > 0
-      ? Math.max(0.35, 1 - startRiskPenalty / Math.max(12, recommendedStarts * 12))
-      : 0.9;
-  const executionFactor = Math.max(0.35, startExecutionRate);
+      ? Math.max(
+          ACTIONABILITY_WEIGHTS.minStartRiskFactor,
+          1 -
+            startRiskPenalty /
+              Math.max(
+                ACTIONABILITY_WEIGHTS.minStartRiskPenaltyDenominator,
+                recommendedStarts * ACTIONABILITY_WEIGHTS.startRiskPenaltyDenominatorPerStart
+              )
+        )
+      : ACTIONABILITY_WEIGHTS.noStartRiskFactor;
+  const executionFactor = Math.max(ACTIONABILITY_WEIGHTS.minExecutionFactor, startExecutionRate);
   const weight = Math.max(
-    0.2,
-    Math.min(1.1, 0.45 * addDropActionability + 0.3 * startRiskFactor + 0.25 * executionFactor - blockedPenalty)
+    ACTIONABILITY_WEIGHTS.minWeight,
+    Math.min(
+      ACTIONABILITY_WEIGHTS.maxWeight,
+      ACTIONABILITY_WEIGHTS.addDropWeight * addDropActionability +
+        ACTIONABILITY_WEIGHTS.startRiskWeight * startRiskFactor +
+        ACTIONABILITY_WEIGHTS.executionWeight * executionFactor -
+        blockedPenalty
+    )
   );
 
   return {
@@ -741,7 +789,7 @@ function scoreTargetsActionabilityWeighted(snapshot, nextSnapshot, targets, acti
   const diagnostics = actionability || actionabilityDiagnostics(snapshot, nextSnapshot);
   const rankAwareGain = scoreTargetsRankAware(snapshot, nextSnapshot, targets);
   const directNextGain = scoreTargetsVsNextTeam(snapshot, nextSnapshot, targets);
-  return rankAwareGain * diagnostics.weight + directNextGain * 0.35;
+  return rankAwareGain * diagnostics.weight + directNextGain * ACTIONABILITY_WEIGHTS.directNextGainWeight;
 }
 
 function oracleTargetsRankAware(snapshot, nextSnapshot, categoryKeys, topN) {
@@ -1070,6 +1118,10 @@ const summary = {
     uniqueDates: new Set(raw.map((s) => s.date)).size,
   },
   params: args,
+  modelConfig: {
+    actionabilityWeights: ACTIONABILITY_WEIGHTS,
+    startRiskThresholds: START_RISK_THRESHOLDS,
+  },
   categoryKeys: result.categoryKeys,
   historicalFeatures: result.historicalFeatures,
   methods: Object.fromEntries(

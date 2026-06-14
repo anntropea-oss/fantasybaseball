@@ -44,6 +44,22 @@ const HITTER_STABILIZER_AB = 200;
 const PITCHER_STABILIZER_IP = 30;
 const MAX_HISTORY_KEYS = 80;
 const MAX_ARCHETYPE_KEYS = 120;
+const DEFAULT_RECENT_DROP_ADD_COOLDOWN_DAYS = 3;
+const MODEL_PROMOTION_THRESHOLDS = {
+  minDailyActionabilityDelta: 0.1,
+  minAllRunsActionabilityDelta: 0.03,
+  minDailyRankAwareDelta: 0.15,
+  minAllRunsRankAwareDelta: 0.05,
+  minDailyRawDelta: -0.05,
+  minAllRunsRawDelta: -0.05,
+  minDailyDirectNextDelta: 0,
+  minAllRunsDirectNextDelta: 0,
+  minDailyActionabilityWeight: 0.45,
+  minAllRunsActionabilityWeight: 0.45,
+  minDailyEvaluations: 20,
+  minDailyRegretDelta: 0,
+  minAllRunsRegretDelta: 0,
+};
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -208,6 +224,7 @@ function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
   const daily = dailyReport.methods?.[method] || null;
   const allRuns = allReport.methods?.[method] || null;
   if (!daily || !allRuns) return false;
+  const gate = MODEL_PROMOTION_THRESHOLDS;
   const dailyDelta = toNumber(daily.deltaMeanGainVsBaseline) ?? -Infinity;
   const allDelta = toNumber(allRuns.deltaMeanGainVsBaseline) ?? -Infinity;
   const dailyRankAwareDelta =
@@ -234,19 +251,19 @@ function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
     toNumber(allRuns.deltaRegretVsBaseline) ??
     -Infinity;
   return (
-    dailyActionabilityDelta > 0.1 &&
-    allActionabilityDelta > 0.03 &&
-    dailyRankAwareDelta > 0.15 &&
-    allRankAwareDelta > 0.05 &&
-    dailyDelta >= -0.05 &&
-    allDelta >= -0.05 &&
-    dailyDirectNextDelta >= 0 &&
-    allDirectNextDelta >= 0 &&
-    dailyActionabilityWeight >= 0.45 &&
-    allActionabilityWeight >= 0.45 &&
-    dailyN >= 20 &&
-    dailyRegretDelta >= 0 &&
-    allRegretDelta >= 0
+    dailyActionabilityDelta > gate.minDailyActionabilityDelta &&
+    allActionabilityDelta > gate.minAllRunsActionabilityDelta &&
+    dailyRankAwareDelta > gate.minDailyRankAwareDelta &&
+    allRankAwareDelta > gate.minAllRunsRankAwareDelta &&
+    dailyDelta >= gate.minDailyRawDelta &&
+    allDelta >= gate.minAllRunsRawDelta &&
+    dailyDirectNextDelta >= gate.minDailyDirectNextDelta &&
+    allDirectNextDelta >= gate.minAllRunsDirectNextDelta &&
+    dailyActionabilityWeight >= gate.minDailyActionabilityWeight &&
+    allActionabilityWeight >= gate.minAllRunsActionabilityWeight &&
+    dailyN >= gate.minDailyEvaluations &&
+    dailyRegretDelta >= gate.minDailyRegretDelta &&
+    allRegretDelta >= gate.minAllRunsRegretDelta
   );
 }
 
@@ -444,6 +461,25 @@ function runBenchmarkCommand(args, label) {
   });
 }
 
+function annotateBenchmarkReportWithPromotionConfig(filePath) {
+  const report = readJsonFileSafe(filePath);
+  if (!report) return;
+  fs.writeFileSync(
+    filePath,
+    JSON.stringify(
+      {
+        ...report,
+        modelConfig: {
+          ...(report.modelConfig || {}),
+          promotionGate: MODEL_PROMOTION_THRESHOLDS,
+        },
+      },
+      null,
+      2
+    )
+  );
+}
+
 function appendBenchmarkHistoryEntry() {
   const daily = readJsonFileSafe(MODEL_BENCHMARK_DAILY_REPORT);
   const allRuns = readJsonFileSafe(MODEL_BENCHMARK_ALL_REPORT);
@@ -472,6 +508,11 @@ function appendBenchmarkHistoryEntry() {
       dailyBest && benchmarkQualifiesAsChampion(daily, allRuns, dailyBest.method)
         ? dailyBest.method
         : null,
+    modelConfig: {
+      promotionGate: MODEL_PROMOTION_THRESHOLDS,
+      daily: daily?.modelConfig || null,
+      allRuns: allRuns?.modelConfig || null,
+    },
   });
 }
 
@@ -522,6 +563,8 @@ async function benchmark() {
       "all-runs sensitivity"
     );
   }
+  annotateBenchmarkReportWithPromotionConfig(MODEL_BENCHMARK_DAILY_REPORT);
+  annotateBenchmarkReportWithPromotionConfig(MODEL_BENCHMARK_ALL_REPORT);
   appendBenchmarkHistoryEntry();
   console.log("");
   printModelStatus();
@@ -2030,10 +2073,77 @@ function addBlockIsActive(block) {
   return !today || daysBetweenUtc(today, until) >= 0;
 }
 
-function getAddBlock(config, player) {
+function getRecentDropAddCooldownDays(config) {
+  const configured = toNumber(config?.recentDropAddCooldownDays);
+  if (configured === null) return DEFAULT_RECENT_DROP_ADD_COOLDOWN_DAYS;
+  return Math.max(0, Math.floor(configured));
+}
+
+function addPlayerEvents(events, names, type, date, source, order) {
+  if (!Array.isArray(names) || !date) return;
+  names.forEach((name) => {
+    const playerName = String(name || "").trim();
+    if (!playerName) return;
+    events.push({
+      name: playerName,
+      type,
+      date,
+      source,
+      order,
+    });
+  });
+}
+
+function buildRecentDropAddBlocks(config, { actions = [], snapshots = [] } = {}) {
+  const cooldownDays = getRecentDropAddCooldownDays(config);
+  if (cooldownDays <= 0) return [];
+  const today = parseIsoDate(todayDateString());
+  if (!today) return [];
+
+  const events = [];
+  actions.forEach((action, index) => {
+    const date = String(action?.date || action?.id || "").slice(0, 10);
+    addPlayerEvents(events, action?.adds, "add", date, action?.source || "action-log", index);
+    addPlayerEvents(events, action?.drops, "drop", date, action?.source || "action-log", index);
+  });
+  snapshots.forEach((snapshot, index) => {
+    const inferred = snapshot?.inferredActionsFromPrev;
+    if (!inferred) return;
+    const date = String(inferred.date || snapshot.date || "").slice(0, 10);
+    addPlayerEvents(events, inferred.adds, "add", date, "inferred-roster", actions.length + index);
+    addPlayerEvents(events, inferred.drops, "drop", date, "inferred-roster", actions.length + index);
+  });
+
+  const latestByName = new Map();
+  events
+    .filter((event) => parseIsoDate(event.date))
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.order - b.order)
+    .forEach((event) => {
+      latestByName.set(normalizeNameKey(event.name), event);
+    });
+
+  return [...latestByName.values()]
+    .filter((event) => {
+      if (event.type !== "drop") return false;
+      const dropDate = parseIsoDate(event.date);
+      if (!dropDate) return false;
+      const age = daysBetweenUtc(dropDate, today);
+      return age >= 0 && age <= cooldownDays;
+    })
+    .map((event) => ({
+      playerName: event.name,
+      droppedAt: event.date,
+      unavailableUntil: addDaysLocalDateString(event.date, cooldownDays),
+      source: "recentDropCooldown",
+      reason: `Recently dropped on ${event.date}; suppressing immediate re-add for ${cooldownDays} days.`,
+    }));
+}
+
+function getAddBlock(config, player, recentDropBlocks = []) {
   const blocks = [
     ...(Array.isArray(config?.doNotAdd) ? config.doNotAdd : []),
     ...(Array.isArray(config?.unavailableAdds) ? config.unavailableAdds : []),
+    ...(Array.isArray(recentDropBlocks) ? recentDropBlocks : []),
   ];
   return (
     blocks.find((block) => addBlockMatchesPlayer(block, player) && addBlockIsActive(block)) ||
@@ -5059,6 +5169,10 @@ async function recommend({ snapshotOnly = false } = {}) {
   const weakestCategoryKeys = rankedCategories.slice(0, 3).map((cat) => cat.key);
 
   const learning = loadLearning();
+  const recentDropAddBlocks = buildRecentDropAddBlocks(config, {
+    actions: readJsonl(ACTION_LOG),
+    snapshots: previousSnapshots,
+  });
   const targetModel = benchmarkPromotionCandidate() || "baseline";
   const efficiencyScores = buildEfficiencyScores(
     resolvedCategories,
@@ -5419,6 +5533,7 @@ async function recommend({ snapshotOnly = false } = {}) {
     staleProtectedInjuryReviews: [],
     blockedProtectedDrops: [],
     blockedAddCandidates: [],
+    recentDropAddBlocks,
     noAddReason: null,
     noDropReason: null,
   };
@@ -5585,7 +5700,7 @@ async function recommend({ snapshotOnly = false } = {}) {
           playerKey: extractPlayerKey(player),
         }));
       blockedAddCandidates = allSuggestedPlayers
-        .map((item) => ({ item, block: getAddBlock(config, item) }))
+        .map((item) => ({ item, block: getAddBlock(config, item, recentDropAddBlocks) }))
         .filter(({ block }) => block)
         .map(({ item, block }) => ({
           name: item.name,
@@ -5599,9 +5714,17 @@ async function recommend({ snapshotOnly = false } = {}) {
             typeof block === "object"
               ? block.unavailableUntil || block.until || null
               : null,
+          source:
+            typeof block === "object"
+              ? block.source || null
+              : null,
+          droppedAt:
+            typeof block === "object"
+              ? block.droppedAt || null
+              : null,
         }));
       const suggestedPlayers = allSuggestedPlayers.filter(
-        (item) => !getAddBlock(config, item)
+        (item) => !getAddBlock(config, item, recentDropAddBlocks)
       );
       dropDiagnostics = {
         ...dropDiagnostics,

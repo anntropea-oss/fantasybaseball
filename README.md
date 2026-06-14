@@ -225,6 +225,15 @@ team standings discoverable from the authenticated Yahoo account. Useful flags:
   ]
 }
 ```
+- Recent drops are also blocked from immediate re-add recommendations for
+  `recentDropAddCooldownDays` days, defaulting to `3`. The cooldown is inferred
+  from logged actions and roster-change snapshots, and can be disabled with:
+
+```json
+{
+  "recentDropAddCooldownDays": 0
+}
+```
 - Historical backfill tables are stored in `logs/fantasy.db`:
   `historical_player_pools`, `historical_players`,
   `historical_player_stats`, `historical_leagues`, and
