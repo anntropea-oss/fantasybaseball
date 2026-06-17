@@ -59,7 +59,34 @@ const MODEL_PROMOTION_THRESHOLDS = {
   minDailyEvaluations: 20,
   minDailyRegretDelta: 0,
   minAllRunsRegretDelta: 0,
+  // A challenger should not become champion by being spiky if it is less reliable.
+  minDailyPickHitRateDelta: 0,
+  minAllRunsPickHitRateDelta: 0,
+  minDailyPositiveActionabilityDayRateDelta: 0,
+  minAllRunsPositiveActionabilityDayRateDelta: 0,
+  minDailyPositiveRankAwareDayRateDelta: 0,
+  minAllRunsPositiveRankAwareDayRateDelta: 0,
 };
+const MODEL_PROMOTION_RELIABILITY_CHECKS = [
+  {
+    metric: "pickHitRate",
+    label: "pick-hit",
+    dailyGate: "minDailyPickHitRateDelta",
+    allGate: "minAllRunsPickHitRateDelta",
+  },
+  {
+    metric: "positiveActionabilityWeightedDayRate",
+    label: "positive actionability day",
+    dailyGate: "minDailyPositiveActionabilityDayRateDelta",
+    allGate: "minAllRunsPositiveActionabilityDayRateDelta",
+  },
+  {
+    metric: "positiveRankAwareDayRate",
+    label: "positive rank-aware day",
+    dailyGate: "minDailyPositiveRankAwareDayRateDelta",
+    allGate: "minAllRunsPositiveRankAwareDayRateDelta",
+  },
+];
 
 const AUTH_AUTHORIZE_URL = "https://api.login.yahoo.com/oauth2/request_auth";
 const AUTH_TOKEN_URL = "https://api.login.yahoo.com/oauth2/get_token";
@@ -196,6 +223,13 @@ function benchmarkMethodRows(report) {
       blockedRate: toNumber(metrics.blockedRate) ?? 0,
       meanStartRiskPenalty: toNumber(metrics.meanStartRiskPenalty) ?? 0,
       meanStartExecutionRate: toNumber(metrics.meanStartExecutionRate) ?? 0,
+      pickHitRate: toNumber(metrics.pickHitRate) ?? 0,
+      positiveDayRate: toNumber(metrics.positiveDayRate) ?? 0,
+      positiveRankAwareDayRate: toNumber(metrics.positiveRankAwareDayRate) ?? 0,
+      positiveActionabilityWeightedDayRate:
+        toNumber(metrics.positiveActionabilityWeightedDayRate) ?? 0,
+      actionabilityWeightedCaptureRate:
+        toNumber(metrics.actionabilityWeightedCaptureRate) ?? 0,
       deltaMeanGainVsBaseline: toNumber(metrics.deltaMeanGainVsBaseline) ?? 0,
       deltaRankAwareGainVsBaseline: toNumber(metrics.deltaRankAwareGainVsBaseline) ?? 0,
       deltaActionabilityWeightedGainVsBaseline:
@@ -209,14 +243,57 @@ function benchmarkMethodRows(report) {
     }));
 }
 
-function benchmarkBestChallenger(report) {
-  const rows = benchmarkMethodRows(report).sort(
+function benchmarkSortedChallengers(report) {
+  return benchmarkMethodRows(report).sort(
     (a, b) =>
       b.deltaActionabilityWeightedGainVsBaseline - a.deltaActionabilityWeightedGainVsBaseline ||
       b.deltaRankAwareGainVsBaseline - a.deltaRankAwareGainVsBaseline ||
       b.deltaDirectNextGainVsBaseline - a.deltaDirectNextGainVsBaseline
   );
+}
+
+function benchmarkBestChallenger(report) {
+  const rows = benchmarkSortedChallengers(report);
   return rows[0] || null;
+}
+
+function benchmarkMetricDelta(report, method, metric) {
+  const challengerValue = toNumber(report?.methods?.[method]?.[metric]);
+  const baselineValue = toNumber(report?.methods?.baseline?.[metric]);
+  if (challengerValue === null || baselineValue === null) return null;
+  return challengerValue - baselineValue;
+}
+
+function benchmarkReliabilityGateFailures(dailyReport, allReport, method) {
+  const gate = MODEL_PROMOTION_THRESHOLDS;
+  const failures = [];
+  MODEL_PROMOTION_RELIABILITY_CHECKS.forEach((check) => {
+    [
+      { label: "daily", report: dailyReport, gateKey: check.dailyGate },
+      { label: "all-runs", report: allReport, gateKey: check.allGate },
+    ].forEach(({ label, report, gateKey }) => {
+      const delta = benchmarkMetricDelta(report, method, check.metric);
+      const threshold = gate[gateKey];
+      if (delta === null || delta < threshold) {
+        failures.push({
+          label: `${label} ${check.label}`,
+          delta,
+          threshold,
+        });
+      }
+    });
+  });
+  return failures;
+}
+
+function benchmarkReliabilitySummary(dailyReport, allReport, method) {
+  return MODEL_PROMOTION_RELIABILITY_CHECKS.map((check) => {
+    const dailyDelta = benchmarkMetricDelta(dailyReport, method, check.metric);
+    const allDelta = benchmarkMetricDelta(allReport, method, check.metric);
+    return `${check.label} daily ${formatPercentagePointDelta(
+      dailyDelta
+    )}/all ${formatPercentagePointDelta(allDelta)}`;
+  }).join(", ");
 }
 
 function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
@@ -250,6 +327,7 @@ function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
     toNumber(allRuns.deltaRankAwareRegretVsBaseline) ??
     toNumber(allRuns.deltaRegretVsBaseline) ??
     -Infinity;
+  const reliabilityFailures = benchmarkReliabilityGateFailures(dailyReport, allReport, method);
   return (
     dailyActionabilityDelta > gate.minDailyActionabilityDelta &&
     allActionabilityDelta > gate.minAllRunsActionabilityDelta &&
@@ -263,7 +341,16 @@ function benchmarkQualifiesAsChampion(dailyReport, allReport, method) {
     allActionabilityWeight >= gate.minAllRunsActionabilityWeight &&
     dailyN >= gate.minDailyEvaluations &&
     dailyRegretDelta >= gate.minDailyRegretDelta &&
-    allRegretDelta >= gate.minAllRunsRegretDelta
+    allRegretDelta >= gate.minAllRunsRegretDelta &&
+    reliabilityFailures.length === 0
+  );
+}
+
+function benchmarkQualifiedChallenger(dailyReport, allReport) {
+  return (
+    benchmarkSortedChallengers(dailyReport).find((row) =>
+      benchmarkQualifiesAsChampion(dailyReport, allReport, row.method)
+    ) || null
   );
 }
 
@@ -302,16 +389,18 @@ function benchmarkPromotionCandidate() {
   const daily = readJsonFileSafe(MODEL_BENCHMARK_DAILY_REPORT);
   const allRuns = readJsonFileSafe(MODEL_BENCHMARK_ALL_REPORT);
   if (!benchmarkFreshness().fresh) return null;
-  const best = benchmarkBestChallenger(daily);
-  if (!best || !benchmarkQualifiesAsChampion(daily, allRuns, best.method)) {
-    return null;
-  }
-  return best.method;
+  return benchmarkQualifiedChallenger(daily, allRuns)?.method || null;
 }
 
 function formatSigned(value, digits = 3) {
   const n = toNumber(value) ?? 0;
   return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}`;
+}
+
+function formatPercentagePointDelta(value, digits = 1) {
+  const n = toNumber(value);
+  if (n === null) return "n/a";
+  return `${n >= 0 ? "+" : ""}${(n * 100).toFixed(digits)}pp`;
 }
 
 function benchmarkModelStatusLines() {
@@ -326,14 +415,13 @@ function benchmarkModelStatusLines() {
   const allBaseline = allRuns?.methods?.baseline || null;
   const best = benchmarkBestChallenger(daily);
   const freshness = benchmarkFreshness();
-  const promoted = best
-    ? freshness.fresh && benchmarkQualifiesAsChampion(daily, allRuns, best.method)
-    : false;
+  const promotedMethod = freshness.fresh ? benchmarkPromotionCandidate() : null;
+  const promoted = Boolean(promotedMethod);
   const lines = [];
 
   lines.push(
     promoted
-      ? `Champion: ${best.method} is active for target selection.`
+      ? `Champion: ${promotedMethod} is active for target selection.`
       : freshness.fresh
         ? "Champion: current heuristic remains production default."
         : `Champion: current heuristic remains production default (benchmark stale vs ${freshness.snapshotCount} snapshots; run \`node cli.js benchmark\`).`
@@ -383,8 +471,22 @@ function benchmarkModelStatusLines() {
         best.deltaActionabilityWeightedGainVsBaseline
       )}${allText} vs baseline; direct-team-above daily ${formatSigned(
         best.deltaDirectNextGainVsBaseline
-      )}.`
+      )}; reliability ${benchmarkReliabilitySummary(daily, allRuns, best.method)}.`
     );
+    const reliabilityFailures = benchmarkReliabilityGateFailures(daily, allRuns, best.method);
+    if (!promoted && freshness.fresh && reliabilityFailures.length > 0) {
+      lines.push(
+        `Promotion gate: ${best.method} blocked by ${reliabilityFailures
+          .slice(0, 3)
+          .map(
+            (failure) =>
+              `${failure.label} ${formatPercentagePointDelta(
+                failure.delta
+              )} below ${formatPercentagePointDelta(failure.threshold)} gate`
+          )
+          .join("; ")}.`
+      );
+    }
   }
   if (allBaseline) {
     lines.push(
@@ -486,6 +588,7 @@ function appendBenchmarkHistoryEntry() {
   if (!daily && !allRuns) return;
   const dailyBest = benchmarkBestChallenger(daily);
   const allBest = benchmarkBestChallenger(allRuns);
+  const promotionCandidate = benchmarkQualifiedChallenger(daily, allRuns);
   appendJsonl(MODEL_BENCHMARK_HISTORY_LOG, {
     id: new Date().toISOString(),
     daily: daily
@@ -504,10 +607,7 @@ function appendBenchmarkHistoryEntry() {
           bestChallenger: allBest,
         }
       : null,
-    promotionCandidate:
-      dailyBest && benchmarkQualifiesAsChampion(daily, allRuns, dailyBest.method)
-        ? dailyBest.method
-        : null,
+    promotionCandidate: promotionCandidate?.method || null,
     modelConfig: {
       promotionGate: MODEL_PROMOTION_THRESHOLDS,
       daily: daily?.modelConfig || null,

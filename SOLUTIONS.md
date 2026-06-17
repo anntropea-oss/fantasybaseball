@@ -213,3 +213,51 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js` and `node --check scripts/model-benchmark-deep.mjs` passed; `caffeinate -dimsu node cli.js benchmark` completed daily and all-runs reports, and `logs/model-benchmark-deep-daily-top3-train10.json` includes `modelConfig.actionabilityWeights`, `modelConfig.startRiskThresholds`, and `modelConfig.promotionGate`.
+
+## [2026-06-17 08:41] Benchmark Actionability Is Not Method-Specific
+- Problem: The actionability-weighted benchmark can promote a challenger without actually simulating whether that challenger's concrete add/drop/start recommendations would be executable. In the latest reports, baseline, weakest, ridge, opportunity, and oracle all have identical `meanActionabilityWeight`, `blockedRate`, `meanStartRiskPenalty`, and `meanStartExecutionRate` values.
+- Root Cause: `scripts/model-benchmark-deep.mjs` computes `actionabilityDiagnostics(snapshot, nextSnapshot)` once per historical snapshot and applies that same day-level weight to every target method. The candidate methods only change target category sets, not generated roster actions, safe drops, blocked adds, or start risk.
+- Solution: No code fix applied yet. Recommended fix is to separate target-selection benchmarking from end-to-end recommendation simulation, or explicitly label this metric as day-weighted target performance and add a real action simulation/promotion gate for candidate methods.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Inspected `logs/model-benchmark-deep-daily-top3-train10.json` and `logs/model-benchmark-deep-all-top3-train20.json`; actionability metrics are identical across evaluated methods while only target-category gains differ.
+
+## [2026-06-17 08:41] Champion Gate Ignores Reliability And Rank Lift
+- Problem: `weakest` is active as champion even though it has lower pick-hit and positive-day rates than baseline, and it does not improve actual rank movement in the benchmark. This can promote a volatile target model that occasionally gains category points but is poor at consistently producing useful daily recommendations.
+- Root Cause: `benchmarkQualifiesAsChampion` gates on mean actionability/rank-aware/raw deltas and non-negative direct-next deltas, but it does not require improved pick-hit rate, positive-day rate, rank-improve rate, gap closure, or statistically meaningful margin. Benchmark `rankImproveRate` is also copied from actual historical transitions and is identical across methods, so it is not a method-specific promotion signal.
+- Solution: No code fix applied yet. Recommended fix is to add reliability gates and demote challengers unless they improve hit rate/positive-day rate or a method-specific rank/gap simulation, and to require a positive direct-next/team-above objective rather than merely non-negative.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Latest daily benchmark: `weakest` actionability delta +0.158 but pick-hit 18.9% vs baseline 25.8% and positive actionability day rate 39.6% vs baseline 45.3%; all-runs pick-hit 8.5% vs baseline 11.5%, while rank-improve rate is identical across methods.
+
+## [2026-06-17 08:41] Direct Team-Above Objective Is Too Sparse
+- Problem: The model status reports `direct-team-above daily +0.000` and still permits `weakest` as champion, but today's active targets do not directly pressure the team above us in the standings. The current team above us is The Civic Agents, while K, ERA, and R are chasing other teams in category gaps.
+- Root Cause: `scoreTargetsVsNextTeam` only gives credit when `categoryNextGaps[key].nextTeamKey` exactly equals `pointsToNextTeam.nextTeamKey`. If the team above us is not the immediate next team in a category, the metric returns zero instead of measuring the multi-step category distance needed to catch or defend against that specific team.
+- Solution: No code fix applied yet. Recommended fix is to compute category deltas directly against the current overall next team for every category, including multi-point distance, defensive categories where they can gain on us, and expected weekly movement.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Latest snapshot has `pointsToNextTeam.nextTeamName` The Civic Agents; category gaps for K, ERA, and R point to Porto Support-O's, Baltimore Chops, and Greatest Hits respectively, so the active target set is not directly optimized against the standings team above us.
+
+## [2026-06-17 08:41] Effectiveness Attribution Treats Sparse Runs As Daily Feedback
+- Problem: The recommendation output says "Effectiveness since prior day" even when the comparison spans multiple calendar days. The latest output compares 2026-06-14 to 2026-06-17, so the reported start outcome, target point movement, and gap movement can include several days of unrelated team/opponent movement.
+- Root Cause: `buildEffectivenessSummary` chooses the most recent snapshot from a different date and does not require it to be exactly yesterday or label the elapsed day count. Sparse recommendation runs therefore become multi-day attribution windows with daily wording.
+- Solution: No code fix applied yet. Recommended fix is to print the actual date span/day count, avoid calling it prior-day when days > 1, and either normalize attribution by elapsed days or require daily snapshots before using the result in model feedback.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: `logs/snapshots.jsonl` latest unique dates jump from 2026-06-14 to 2026-06-17; `node cli.js rank-review --days 21` reports latest daily attribution as `2026-06-14 -> 2026-06-17` with gap closed -6.5.
+
+## [2026-06-17 08:41] Start Model Allows Ratio-Risk Starts While ERA Is Targeted
+- Problem: The start model can recommend high-risk pitcher starts even when ERA is an active target, contributing to ratio damage and negative target outcomes.
+- Root Cause: `buildStartScore` gives large additive bonuses for probable starters and projected strikeouts, then subtracts ratio risk as a penalty. The penalty is not a hard veto or threshold simulation, so high-ERA/bulk-IP starts can still score positive while ERA/WHIP points are fragile.
+- Solution: No code fix applied yet. Recommended fix is to add a ratio-risk veto or expected roto-point simulation for ERA/WHIP targets, especially when projected innings are high and the category point gap is small.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Open
+- Verification: Historical action details show recommendations such as José Soriano on 2026-06-13 with ERA 5.53, WHIP 1.63, projected 5.2 IP, and only an additive downside penalty; rank review later flagged that start as high ERA risk while the latest target outcome was negative.
+
+## [2026-06-17 16:01] Add Reliability Gates To Champion Promotion
+- Problem: The benchmark could promote `weakest` as the active champion even though it had worse pick-hit and positive-day rates than the baseline, causing the recommender to favor a spiky model that looked better on mean actionability but missed more often in production.
+- Root Cause: `benchmarkQualifiesAsChampion` only gated on mean gain, actionability, rank-aware gain, regret, and direct-next deltas. It did not compare challenger reliability metrics against baseline before allowing promotion.
+- Solution: Added reliability promotion gates for pick-hit rate, positive actionability-weighted day rate, and positive rank-aware day rate across both daily and all-runs benchmark windows. Centralized qualified-challenger selection so benchmark history, model status, and `recommend` use the same gate, and added model-status output explaining reliability deltas and promotion blocks.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js`, `node --check scripts/model-benchmark-deep.mjs`, `caffeinate -dimsu node cli.js benchmark`, and `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed. The benchmark now reports `Champion: current heuristic remains production default` and blocks `weakest` for daily pick-hit -6.8pp, all-runs pick-hit -3.0pp, and daily positive actionability day -5.6pp versus baseline.
