@@ -261,3 +261,11 @@
 - Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
 - Status: Resolved
 - Verification: `node --check cli.js`, `node --check scripts/model-benchmark-deep.mjs`, `caffeinate -dimsu node cli.js benchmark`, and `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed. The benchmark now reports `Champion: current heuristic remains production default` and blocks `weakest` for daily pick-hit -6.8pp, all-runs pick-hit -3.0pp, and daily positive actionability day -5.6pp versus baseline.
+
+## [2026-06-19 10:00] Open Roster Spots Incorrectly Required Drops
+- Problem: The June 19 recommendation reported `6 add candidates, 0 safe drop candidates` and recommended no add even though Yahoo allowed an add. The live roster had unused normal roster capacity.
+- Root Cause: Add generation filtered every candidate unless it could be paired with a safe drop. It never compared occupied roster slots with the configured league capacity, and benchmark actionability likewise treated zero safe drops as blocked regardless of open roster spots.
+- Solution: Added normal and IL roster-capacity accounting from league settings, globally allocated the best candidates to open normal roster spots before attempting drop pairings, emitted explicit no-drop add details, persisted capacity diagnostics in snapshots, and updated rank-review/benchmark actionability so open-capacity days are not classified as safe-drop blocks.
+- Files Changed: `/Users/atropea/coding/fantasy baseball/fantasy/cli.js`, `/Users/atropea/coding/fantasy baseball/fantasy/scripts/model-benchmark-deep.mjs`, `/Users/atropea/coding/fantasy baseball/fantasy/SOLUTIONS.md`
+- Status: Resolved
+- Verification: `node --check cli.js`, `node --check scripts/model-benchmark-deep.mjs`, `git diff --check`, and `caffeinate -dimsu node --test tests/e2e/run-e2e.mjs` passed. A live `caffeinate -dimsu node cli.js recommend --no-benchmark-refresh --no-dashboard` run detected 23 normal slots, 21 occupied, and 2 open; it recommended Troy Johnston and Willi Castro into open roster spots with no drops.

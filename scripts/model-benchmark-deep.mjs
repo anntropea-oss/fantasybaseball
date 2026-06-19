@@ -712,13 +712,21 @@ function actionabilityDiagnostics(snapshot, nextSnapshot) {
     toNumber(diagnostics.safeDropCandidates) ??
     toNumber(candidatePool.drops) ??
     (actions.drop?.length || 0);
+  const openRosterSpots =
+    toNumber(diagnostics.openRosterSpots) ??
+    toNumber(diagnostics.rosterCapacity?.openNormalSpots) ??
+    0;
   const blockedAddCandidates = Array.isArray(diagnostics.blockedAddCandidates)
     ? diagnostics.blockedAddCandidates.length
     : 0;
   const blockedProtectedDrops = Array.isArray(diagnostics.blockedProtectedDrops)
     ? diagnostics.blockedProtectedDrops.length
     : 0;
-  const addBlockedByDrops = addCandidateCount > 0 && safeDropCandidates === 0;
+  const addBlockedByDrops =
+    addCandidateCount > 0 &&
+    safeDropCandidates === 0 &&
+    openRosterSpots === 0 &&
+    recommendedAdds === 0;
   const startDetails = recommendedStartDetails(snapshot);
   const startRiskPenalty = startDetails.reduce(
     (sum, detail) => sum + startRiskPenaltyFromSchedule(detail.schedule),
@@ -735,7 +743,7 @@ function actionabilityDiagnostics(snapshot, nextSnapshot) {
 
   const addDropActionability =
     addCandidateCount > 0
-      ? safeDropCandidates > 0
+      ? safeDropCandidates > 0 || openRosterSpots > 0
         ? 1
         : ACTIONABILITY_WEIGHTS.noSafeDropActionability
       : ACTIONABILITY_WEIGHTS.noAddCandidateActionability;
@@ -777,6 +785,7 @@ function actionabilityDiagnostics(snapshot, nextSnapshot) {
     blockedAddCandidates,
     blockedProtectedDrops,
     safeDropCandidates,
+    openRosterSpots,
     addCandidateCount,
     recommendedAdds,
     recommendedStarts,
@@ -1068,6 +1077,7 @@ async function runBenchmark(snapshots, args) {
         addBlockedByDrops: actionability.addBlockedByDrops,
         blockedAddCandidates: actionability.blockedAddCandidates,
         safeDropCandidates: actionability.safeDropCandidates,
+        openRosterSpots: actionability.openRosterSpots,
         startRiskPenalty: actionability.startRiskPenalty,
         startExecutionRate: actionability.startExecutionRate,
         nextGapGain: nextGapGain(snapshot, nextSnapshot),

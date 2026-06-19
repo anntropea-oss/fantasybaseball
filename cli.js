@@ -1707,6 +1707,7 @@ function buildSnapshotFeatures({
         positions: d.positions || [],
         targetCategories: d.targetCategories || [],
         pairedDrop: d.pairedDrop || null,
+        usesOpenRosterSpot: !!d.usesOpenRosterSpot,
         archetype: d.archetype || null,
         archetypeFitScore: toNumber(d.archetypeFitScore),
         statsScore: toNumber(d.statsScore),
@@ -1815,6 +1816,52 @@ function computeLineupOpenSlots(rosterPositions, mappedPlayers) {
   });
 
   return openSlots;
+}
+
+function isInjuredListSlot(slot) {
+  return ["IL", "IL+", "IR"].includes(normalizeSlot(slot));
+}
+
+function computeRosterCapacity(rosterPositions, mappedPlayers) {
+  const configuredSlots = Array.isArray(rosterPositions)
+    ? rosterPositions.map(normalizeSlot).filter(Boolean)
+    : [];
+  const roster = Array.isArray(mappedPlayers) ? mappedPlayers : [];
+  if (configuredSlots.length === 0) {
+    return {
+      known: false,
+      normalCapacity: null,
+      normalOccupied: roster.length,
+      openNormalSpots: 0,
+      injuredListCapacity: null,
+      injuredListOccupied: 0,
+      openInjuredListSpots: 0,
+      totalCapacity: null,
+      totalOccupied: roster.length,
+      totalOpenSpots: 0,
+    };
+  }
+
+  const injuredListCapacity = configuredSlots.filter(isInjuredListSlot).length;
+  const injuredListOccupied = roster.filter((player) =>
+    isInjuredListSlot(
+      player.selectedPrimary || extractPrimarySelectedPosition(player.selected)
+    )
+  ).length;
+  const normalCapacity = configuredSlots.length - injuredListCapacity;
+  const normalOccupied = roster.length - injuredListOccupied;
+  return {
+    known: true,
+    normalCapacity,
+    normalOccupied,
+    openNormalSpots: Math.max(0, normalCapacity - normalOccupied),
+    injuredListCapacity,
+    injuredListOccupied,
+    openInjuredListSpots: Math.max(0, injuredListCapacity - injuredListOccupied),
+    totalCapacity: configuredSlots.length,
+    totalOccupied: roster.length,
+    totalOpenSpots: Math.max(0, configuredSlots.length - roster.length),
+  };
 }
 
 function preferredStartSlots(player) {
@@ -3451,13 +3498,21 @@ function recommendationConstraints(snapshot) {
     toNumber(diagnostics.safeDropCandidates) ??
     toNumber(candidatePool.drops) ??
     (snapshot?.actions?.drop || []).length;
+  const openRosterSpots =
+    toNumber(diagnostics.openRosterSpots) ??
+    toNumber(diagnostics.rosterCapacity?.openNormalSpots) ??
+    0;
   const blockedProtectedDrops = Array.isArray(diagnostics.blockedProtectedDrops)
     ? diagnostics.blockedProtectedDrops.length
     : 0;
   const staleProtectedInjuryReviews = Array.isArray(diagnostics.staleProtectedInjuryReviews)
     ? diagnostics.staleProtectedInjuryReviews.length
     : 0;
-  const addBlockedByDrops = addCandidateCount > 0 && safeDropCandidates === 0;
+  const addBlockedByDrops =
+    addCandidateCount > 0 &&
+    safeDropCandidates === 0 &&
+    openRosterSpots === 0 &&
+    ((counts.add || 0) + (counts.addBatting || 0) + (counts.addPitching || 0) === 0);
   return {
     targetModel: rec.targetModel || "baseline",
     recommendedAdds:
@@ -3466,6 +3521,7 @@ function recommendationConstraints(snapshot) {
     recommendedDrops: counts.drop || (snapshot?.actions?.drop || []).length,
     addCandidateCount,
     safeDropCandidates,
+    openRosterSpots,
     blockedProtectedDrops,
     staleProtectedInjuryReviews,
     addBlockedByDrops,
@@ -5623,10 +5679,13 @@ async function recommend({ snapshotOnly = false } = {}) {
   let dropMessage = null;
   let dropLines = [];
   let dropSuggestions = [];
+  let rosterCapacity = computeRosterCapacity([], []);
   let blockedAddCandidates = [];
   let dropDiagnostics = {
     addCandidateCount: 0,
     safeDropCandidates: 0,
+    openRosterSpots: 0,
+    rosterCapacity,
     statusDropCandidates: 0,
     dropPoolCandidates: 0,
     protectedInjuryReviews: [],
@@ -5927,6 +5986,10 @@ async function recommend({ snapshotOnly = false } = {}) {
         };
       });
     rosterMappedPlayers = mappedPlayers;
+    rosterCapacity = computeRosterCapacity(
+      leagueSettingsFile?.rosterPositions || [],
+      mappedPlayers
+    );
     const protectedInjuryReviews = buildProtectedInjuryReviewStates(
       config,
       doNotDrop,
@@ -5934,6 +5997,8 @@ async function recommend({ snapshotOnly = false } = {}) {
     );
     dropDiagnostics = {
       ...dropDiagnostics,
+      openRosterSpots: rosterCapacity.openNormalSpots,
+      rosterCapacity,
       protectedInjuryReviews,
       staleProtectedInjuryReviews: protectedInjuryReviews.filter(
         (state) => state.reviewStatus === "stale"
@@ -6662,6 +6727,37 @@ async function recommend({ snapshotOnly = false } = {}) {
   const dropByName = new Map(dropSuggestions.map((drop) => [drop.name, drop]));
 
   let addPrintedCount = 0;
+  let openRosterAddsPrinted = 0;
+  const addCandidateIdentity = (candidate) =>
+    candidate?.playerKey || normalizeNameKey(candidate?.name || "");
+  const labeledAddCandidates = [
+    ...(addBattingLabel ? addBattingCandidates : []),
+    ...(addPitchingLabel ? addPitchingCandidates : []),
+    ...(addGeneralLabel ? addGeneralCandidates : []),
+    ...(addPositionLabel ? addPositionCandidates : []),
+  ];
+  const uniqueOpenRosterCandidates = [];
+  const seenOpenRosterCandidateIds = new Set();
+  labeledAddCandidates
+    .slice()
+    .sort((a, b) => {
+      const fitDelta = (b.archetypeFitScore ?? 0) - (a.archetypeFitScore ?? 0);
+      if (fitDelta !== 0) return fitDelta;
+      return (b.statsScore ?? Number.NEGATIVE_INFINITY) -
+        (a.statsScore ?? Number.NEGATIVE_INFINITY);
+    })
+    .forEach((candidate) => {
+      const id = addCandidateIdentity(candidate);
+      if (!id || seenOpenRosterCandidateIds.has(id)) return;
+      seenOpenRosterCandidateIds.add(id);
+      uniqueOpenRosterCandidates.push(candidate);
+    });
+  const openRosterCandidateIds = new Set(
+    uniqueOpenRosterCandidates
+      .slice(0, rosterCapacity.openNormalSpots)
+      .map(addCandidateIdentity)
+  );
+  const reservedAddCandidateIds = new Set();
   const printAddCandidates = (label, candidates, isPitcher) => {
     if (!candidates || candidates.length === 0) return;
     if (!label) return;
@@ -6676,46 +6772,61 @@ async function recommend({ snapshotOnly = false } = {}) {
     });
     const eligible = ordered
       .map((item) => {
+        const candidateId = addCandidateIdentity(item);
+        if (!candidateId || reservedAddCandidateIds.has(candidateId)) return null;
+        const usesOpenRosterSpot = openRosterCandidateIds.has(candidateId);
         const allowCrossTypeForSaves =
           savesEmergency &&
           needsSaves &&
           isPitcher === true &&
           item?.positions?.includes("RP");
-        const dropName = allowCrossTypeForSaves
-          ? takeAnyDropName()
-          : isPitcher === null
-            ? findMatchingDropGeneral(item)
-            : findMatchingDrop(item, isPitcher);
-        return { item, dropName };
+        const dropName = usesOpenRosterSpot
+          ? null
+          : allowCrossTypeForSaves
+            ? takeAnyDropName()
+            : isPitcher === null
+              ? findMatchingDropGeneral(item)
+              : findMatchingDrop(item, isPitcher);
+        if (!usesOpenRosterSpot && !dropName) return null;
+        reservedAddCandidateIds.add(candidateId);
+        return { item, dropName, usesOpenRosterSpot };
       })
-      .filter((pair) => pair.dropName);
+      .filter(Boolean);
     if (eligible.length === 0) {
       return;
     }
     printActionsHeader();
     console.log(cYellow(label));
-    eligible.forEach(({ item, dropName }) => {
+    eligible.forEach(({ item, dropName, usesOpenRosterSpot }) => {
       const position = item.positions.join(", ");
       const tag = item.archetype ? ` [${item.archetype}]` : "";
       console.log(
         fmtBullet(
-          `${item.name}${tag} ${position ? `(${position})` : ""} -> drop ${dropName}`.trim()
+          `${item.name}${tag} ${position ? `(${position})` : ""} -> ${
+            usesOpenRosterSpot ? "open roster spot (no drop)" : `drop ${dropName}`
+          }`.trim()
         )
       );
       addPrintedCount += 1;
+      if (usesOpenRosterSpot) openRosterAddsPrinted += 1;
       const detail = {
         action: "ADD",
         playerName: item.name,
         playerKey: item.playerKey || null,
         positions: item.positions || [],
         pairedDrop: dropName,
-        pairedDropReason: dropByName.get(dropName)?.reason || null,
+        pairedDropReason: dropName ? dropByName.get(dropName)?.reason || null : null,
+        usesOpenRosterSpot,
         targetCategories: item.isPitcher ? pitchingStatKeys : battingStatKeys,
         archetype: item.archetype || null,
         archetypeFitScore: item.archetypeFitScore ?? null,
         statsScore: item.statsScore ?? null,
         yahooRank: item.rank ?? null,
-        why: `Targets ${((item.isPitcher ? pitchingStatKeys : battingStatKeys) || []).join(", ")}; ${item.archetype ? `${item.archetype} archetype; ` : ""}paired with ${dropName} for a net roster move.`,
+        why: `Targets ${((item.isPitcher ? pitchingStatKeys : battingStatKeys) || []).join(", ")}; ${item.archetype ? `${item.archetype} archetype; ` : ""}${
+          usesOpenRosterSpot
+            ? "uses an open roster spot, so no drop is required."
+            : `paired with ${dropName} for a net roster move.`
+        }`,
       };
       if (isPitcher === null) {
         actionSuggestions.add.push(item.name);
@@ -6756,6 +6867,10 @@ async function recommend({ snapshotOnly = false } = {}) {
   }
   printAddCandidates(addGeneralLabel, addGeneralCandidates, null);
   printAddCandidates(addPositionLabel, addPositionCandidates, addPositionIsPitcher);
+  dropDiagnostics = {
+    ...dropDiagnostics,
+    openRosterAddsRecommended: openRosterAddsPrinted,
+  };
   if (
     addPrintedCount === 0 &&
     (addBattingCandidates.length > 0 ||
@@ -6764,7 +6879,10 @@ async function recommend({ snapshotOnly = false } = {}) {
       addPositionCandidates.length > 0)
   ) {
     printActionsHeader();
-    if (dropDiagnostics.safeDropCandidates === 0) {
+    if (
+      dropDiagnostics.safeDropCandidates === 0 &&
+      dropDiagnostics.openRosterSpots === 0
+    ) {
       dropDiagnostics = {
         ...dropDiagnostics,
         noAddReason: "No safe drop candidates after protections.",
@@ -6802,6 +6920,16 @@ async function recommend({ snapshotOnly = false } = {}) {
     dropDiagnostics.staleProtectedInjuryReviews.slice(0, 5).forEach((state) => {
       console.log(fmtBullet(protectedReviewLine(state)));
     });
+  }
+
+  if (openRosterAddsPrinted > 0 && dropSuggestions.length === 0) {
+    dropMessage = `DROP: none required (${openRosterAddsPrinted} add${
+      openRosterAddsPrinted === 1 ? " uses" : "s use"
+    } open roster space).`;
+    dropDiagnostics = {
+      ...dropDiagnostics,
+      noDropReason: dropMessage.replace(/^DROP:\s*/i, ""),
+    };
   }
 
   if (startSelections.length > 0) {
